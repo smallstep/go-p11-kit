@@ -1,3 +1,3 @@
-module github.com/google/go-p11-kit
+module github.com/smallstep/go-p11-kit
 
 go 1.17
