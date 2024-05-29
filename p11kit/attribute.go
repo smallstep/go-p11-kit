@@ -102,7 +102,7 @@ func (o *Object) SetCertificate(cert *x509.Certificate) error {
 		return err
 	}
 	attrs := []attribute{
-		{typ: attributeID, bytes: derSerial},                               // CKA_ID
+		{typ: attributeID, bytes: cert.SubjectKeyId},                       // CKA_ID
 		{typ: attributeSubject, bytes: cert.RawSubject},                    // CKA_SUBJECT
 		{typ: attributeObjectID, bytes: derSerial},                         // CKA_OBJECT_ID
 		{typ: attributePublicKeyInfo, bytes: cert.RawSubjectPublicKeyInfo}, // CKA_PUBLIC_KEY_INFO
@@ -485,7 +485,7 @@ func NewX509CertificateObject(cert *x509.Certificate) (Object, error) {
 			{typ: attributeSubject, bytes: cert.RawSubject},                    // CKA_SUBJECT
 			{typ: attributeIssuer, bytes: cert.RawIssuer},                      // CKA_ISSUER
 			{typ: attributeValue, bytes: cert.Raw},                             // CKA_VALUE
-			{typ: attributeID, bytes: derSerial},                               // CKA_ID (should match pubKey and privKey's ID)
+			{typ: attributeID, bytes: cert.SubjectKeyId},                       // CKA_ID (should match pubKey and privKey's ID)
 			{typ: attributeSerialNumber, bytes: derSerial},                     // CKA_SERIAL_NUMBER
 			{typ: attributeStartDate, date: &cert.NotBefore},                   // CKA_START_DATE
 			{typ: attributeEndDate, date: &cert.NotAfter},                      // CKA_END_DATE
