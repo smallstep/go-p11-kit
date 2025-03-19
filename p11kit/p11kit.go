@@ -22,7 +22,7 @@
 // Clients configure an environment variable, then dlopen the p11-kit-client.so
 // PKCS #11 shared library to communicate with the remote.
 //
-//     P11_KIT_SERVER_ADDRESS=unix:path=/run/user/12345/p11-kit/pkcs11-12345
+//	P11_KIT_SERVER_ADDRESS=unix:path=/run/user/12345/p11-kit/pkcs11-12345
 //
 // Normally the remote is served by the "p11-kit server ..." command.
 //
@@ -30,46 +30,45 @@
 // program to act as a PKCS #11 module. Users can load keys and certificates,
 // then listen on a unix socket to handle requests from p11-kit-client.so.
 //
-//     privObj, err := p11kit.NewPrivateKeyObject(priv)
-//     if err != nil {
-//         // ...
-//     }
-//     certObj, err := p11kit.NewX509CertificateObject(cert)
-//     if err != nil {
-//         // ...
-//     }
+//	privObj, err := p11kit.NewPrivateKeyObject(priv)
+//	if err != nil {
+//	    // ...
+//	}
+//	certObj, err := p11kit.NewX509CertificateObject(cert)
+//	if err != nil {
+//	    // ...
+//	}
 //
-//     slot := p11kit.Slot{
-//         ID:      0x01,
-//         Objects: []p11kit.Object{privObj, certObj},
-//         // Additional fields...
-//     }
+//	slot := p11kit.Slot{
+//	    ID:      0x01,
+//	    Objects: []p11kit.Object{privObj, certObj},
+//	    // Additional fields...
+//	}
 //
-//     h := p11kit.Handler{
-//         Manufacturer:   "example",
-//         Library:        "example",
-//         LibraryVersion: p11kit.Version{Major: 0, Minor: 1},
-//         Slots:          []p11kit.Slot{slot},
-//     }
+//	h := p11kit.Handler{
+//	    Manufacturer:   "example",
+//	    Library:        "example",
+//	    LibraryVersion: p11kit.Version{Major: 0, Minor: 1},
+//	    Slots:          []p11kit.Slot{slot},
+//	}
 //
-//     l, err := net.Listen("unix", "/run/user/12345/p11-kit/pkcs11-12345")
-//     if err != nil {
-//         // ...
-//     }
-//     defer l.Close()
-//     for {
-//         conn, err := l.Accept()
-//         if err != nil {
-//             // ...
-//         }
-//         go func() {
-//             if err := h.Handle(conn); err != nil {
-//                 log.Println(err)
-//             }
-//             conn.Close()
-//         }()
-//     }
-//
+//	l, err := net.Listen("unix", "/run/user/12345/p11-kit/pkcs11-12345")
+//	if err != nil {
+//	    // ...
+//	}
+//	defer l.Close()
+//	for {
+//	    conn, err := l.Accept()
+//	    if err != nil {
+//	        // ...
+//	    }
+//	    go func() {
+//	        if err := h.Handle(conn); err != nil {
+//	            log.Println(err)
+//	        }
+//	        conn.Close()
+//	    }()
+//	}
 package p11kit
 
 import (
