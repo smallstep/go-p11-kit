@@ -152,6 +152,81 @@ func TestBufferAdd(t *testing.T) {
 			},
 			[]byte("12341230" + "20210101"),
 		},
+		{
+			"addAttributeByte",
+			func(b *buffer) {
+				b.addAttribute(attribute{
+					typ:  attributeToken,
+					byte: bTrue,
+				})
+			},
+			[]byte{
+				0x00, 0x00, 0x00, 0x01,
+				0x01,
+				0x00, 0x00, 0x00, 0x01,
+				0x01,
+			},
+		},
+		{
+			"addAttributeULong",
+			func(b *buffer) {
+				objectClass := ckoCertificate
+				b.addAttribute(attribute{
+					typ:   attributeClass,
+					ulong: &objectClass,
+				})
+			},
+			[]byte{
+				0x00, 0x00, 0x00, 0x00,
+				0x01,
+				0x00, 0x00, 0x00, 0x08,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+			},
+		},
+		{
+			"addAttributeByteArray",
+			func(b *buffer) {
+				b.addAttribute(attribute{
+					typ:   attributeID,
+					bytes: []byte{0x12, 0x34, 0x56, 0x78},
+				})
+			},
+			[]byte{
+				0x00, 0x00, 0x01, 0x02,
+				0x01,
+				0x00, 0x00, 0x00, 0x04,
+				0x00, 0x00, 0x00, 0x04,
+				0x12, 0x34, 0x56, 0x78,
+			},
+		},
+		{
+			"addAttributeDate",
+			func(b *buffer) {
+				t := time.Date(1234, 12, 30, 0, 0, 0, 0, time.UTC)
+				b.addAttribute(attribute{
+					typ:  attributeStartDate,
+					date: &t,
+				})
+			},
+			[]byte{
+				0x00, 0x00, 0x01, 0x10,
+				0x01,
+				0x00, 0x00, 0x00, 0x08,
+				0x31, 0x32, 0x33, 0x34, 0x31, 0x32, 0x33, 0x30,
+			},
+		},
+		{
+			"addAttributeEmpty",
+			func(b *buffer) {
+				b.addAttribute(attribute{
+					typ: attributeWrapTemplate,
+				})
+			},
+			[]byte{
+				0x40, 0x00, 0x02, 0x11,
+				0x00,
+			},
+		},
 	}
 
 	for _, test := range tests {

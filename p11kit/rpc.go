@@ -197,6 +197,10 @@ func newBuffer(b []byte) buffer {
 }
 
 // https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L1039
+// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L1024
+// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L730
+// https://github.com/p11-glue/p11-kit/blob/0.24.0/common/buffer.c#L186
+// https://github.com/p11-glue/p11-kit/issues/679
 func (b *buffer) addAttribute(a attribute) {
 	b.addUint32(uint32(a.typ))
 	val := a.value()
@@ -204,8 +208,16 @@ func (b *buffer) addAttribute(a attribute) {
 		b.addByte(0)
 		return
 	}
+	// An attribute is encoded as a byte array, but the prefix length is not the
+	// length of the full byte array "len(data) + data...", it adds the original
+	// length twice, in this case it will be "len(val) - 4" the extra 4 bytes of
+	// the length prefix in the byte array. See links above.
+	length := uint32(len(val))
+	if a.typ.valueType() == attributeTypeByteArray {
+		length -= 4
+	}
 	b.addByte(1)
-	b.addUint32(uint32(len(val)))
+	b.addUint32(length)
 	b.b = append(b.b, val...)
 }
 
