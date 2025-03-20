@@ -26,7 +26,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/google/go-p11-kit/p11kit"
+	"github.com/smallstep/go-p11-kit/p11kit"
 )
 
 func usage() {

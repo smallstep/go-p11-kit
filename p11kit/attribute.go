@@ -384,6 +384,7 @@ func newKeyObject(pub crypto.PublicKey, isPrivate bool) ([]attribute, error) {
 			attribute{typ: attributeNeverExtractable, byte: bTrue},    // CKA_NEVER_EXTRACTABLE
 			attribute{typ: attributeAlwaysAuthenticate, byte: bFalse}, // CKA_ALWAYS_AUTHENTICATE
 			attribute{typ: attributeSign, byte: bTrue},                // CKA_SIGN
+			attribute{typ: attributeSignRecover, byte: bFalse},        // CKA_SIGN_RECOVER
 			attribute{typ: attributeUnwrap, byte: bFalse},             // CKA_UNWRAP
 		)
 	}
