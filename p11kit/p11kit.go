@@ -308,7 +308,7 @@ func (s *session) findNext(sessionID uint64, max int) ([]uint64, error) {
 // Handle begins serving RPC requests for a given connection.
 func (s *Handler) Handle(rw io.ReadWriter) error {
 	if err := negotiateProtocolVersion(rw); err != nil {
-		return fmt.Errorf("negotiating protocol version: %v", err)
+		return fmt.Errorf("negotiating protocol version: %w", err)
 	}
 
 	h := &handler{s: s}
@@ -344,7 +344,7 @@ func (s *Handler) Handle(rw io.ReadWriter) error {
 	for !done {
 		callID, req, err := readRequest(rw)
 		if err != nil {
-			return fmt.Errorf("read request: %v", err)
+			return fmt.Errorf("read request: %w", err)
 		}
 		var resp *body
 		if h, ok := handlers[req.call]; ok {
@@ -357,7 +357,7 @@ func (s *Handler) Handle(rw io.ReadWriter) error {
 			log.Printf("Error with %s: %v", req.call, err)
 			var cerr pkcs11Error
 			if !errors.As(err, &cerr) {
-				return fmt.Errorf("%d failed: %v", req.call, err)
+				return fmt.Errorf("%d failed: %w", req.call, err)
 			}
 
 			// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-client.c#L142-L143
@@ -365,7 +365,7 @@ func (s *Handler) Handle(rw io.ReadWriter) error {
 			resp.writeUlong(uint64(cerr))
 		}
 		if err := writeResponse(rw, callID, resp); err != nil {
-			return fmt.Errorf("writing response: %v", err)
+			return fmt.Errorf("writing response: %w", err)
 		}
 	}
 	return nil
@@ -881,15 +881,18 @@ func negotiateProtocolVersion(rw io.ReadWriter) error {
 	// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-server.c#L1944
 	peerVersion, err := readByte(rw)
 	if err != nil {
-		return fmt.Errorf("reading protocol version: %v", err)
+		return fmt.Errorf("reading protocol version: %w", err)
 	}
 	// Protocol used by the current P11 kit.
 	const protocolVersion byte = 0
 	if peerVersion != protocolVersion {
-		return fmt.Errorf("client attempting to speak unsupported protocol version: %d", peerVersion)
+		return &ProtocolVersionError{
+			Version:     protocolVersion,
+			PeerVersion: peerVersion,
+		}
 	}
 	if err := writeByte(rw, protocolVersion); err != nil {
-		return fmt.Errorf("writing protocol version: %v", err)
+		return fmt.Errorf("writing protocol version: %w", err)
 	}
 	return nil
 }

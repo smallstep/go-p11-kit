@@ -20,6 +20,19 @@ package p11kit
 
 import "fmt"
 
+// ProtocolVersionError is the error generated when a client attempts to speak
+// an unsupported protocol version.
+type ProtocolVersionError struct {
+	Version     byte
+	PeerVersion byte
+}
+
+// Error implements the error interface on [ProtocolVersionError].
+func (e *ProtocolVersionError) Error() string {
+	return fmt.Sprintf("client attempting to speak unsupported protocol version: %d", e.PeerVersion)
+}
+
+
 // pkcs11Error represents a PKCS #11 return code.
 type pkcs11Error uint64
 
