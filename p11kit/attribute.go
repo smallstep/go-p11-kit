@@ -87,6 +87,20 @@ func (o *Object) SetLabel(label string) {
 	})
 }
 
+// SetKeyIdentifier sets the object's key identifier (CKA_ID), overriding the
+// one set by [Object.SetCertificate].
+func (o *Object) SetKeyIdentifier(b []byte) {
+	for i := range o.attributes {
+		if o.attributes[i].typ == attributeID {
+			o.attributes[i].bytes = b
+			return
+		}
+	}
+	o.attributes = append(o.attributes, attribute{
+		typ: attributeID, bytes: b,
+	})
+}
+
 // SetCertificate associates a public or private key with a certificate. This is
 // required for many clients to know which key corresponds to which certificate.
 //
@@ -422,7 +436,11 @@ func newKeyObject(pub crypto.PublicKey, isPrivate bool) ([]attribute, error) {
 				attribute{typ: attributeValue},                 // CKA_VALUE (empty)
 			)
 		} else {
-			point := elliptic.Marshal(pub.Curve, pub.X, pub.Y)
+			// DER-encoding of ANSI X9.62 ECPoint value
+			point, err := asn1.Marshal(elliptic.Marshal(pub.Curve, pub.X, pub.Y))
+			if err != nil {
+				return nil, fmt.Errorf("encoding ecdsa point: %w", err)
+			}
 			attrs = append(attrs,
 				attribute{typ: attributeEncrypt, byte: bFalse}, // CKA_ENCRYPT
 				attribute{typ: attributeECPoint, bytes: point}, // CKA_EC_POINT
