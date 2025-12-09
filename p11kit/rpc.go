@@ -396,6 +396,17 @@ func (b *buffer) skipNullMarker() {
 	}
 }
 
+// skipByteMarker checks if the buffer starts with the given byte. If present,
+// it advances the buffer by one byte to skip the marker. If not present, the
+// buffer remains unchanged.
+func (b *buffer) skipByteMarker(marker byte) {
+	if len(b.b) > 0 {
+		if b.b[0] == marker {
+			b.b = b.b[1:]
+		}
+	}
+}
+
 func (b *buffer) date(t *time.Time) bool {
 	if len(b.b) < 8 {
 		return false
@@ -639,7 +650,14 @@ func (b *body) readMechanism(m *mechanism) {
 
 		switch m.typ {
 		case ckmRSAPKCSPSS:
+			// Commit https://github.com/p11-glue/p11-kit/commit/6449cfe59b80344c87832c9e38afcb4df3f61c56
+			// (p11-kit 0.25.6+) added an extra byte 0x01 indicating that the
+			// mechanism has parameters. The following code will skip this byte
+			// if present.
+			b.buffer.skipByteMarker(0x01)
+
 			// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L1315
+			// https://github.com/p11-glue/p11-kit/blob/0.25.10/p11-kit/rpc-message.c#L1419
 			var p rsaPKCSPSSParams
 			if !b.buffer.uint64(&p.hashAlg) ||
 				!b.buffer.uint64(&p.mgf) ||
