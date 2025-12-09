@@ -383,6 +383,19 @@ func (b *buffer) byteArray(a *[]byte) bool {
 	return true
 }
 
+// skipNullMarker checks if the buffer starts with the special marker 0xffffffff
+// that represents an empty/null byte array in the RPC protocol. If present, it
+// advances the buffer by 4 bytes to skip the marker. If not present, the buffer
+// remains unchanged.
+func (b *buffer) skipNullMarker() {
+	if len(b.b) >= 4 {
+		buff := b.b[:4]
+		if binaryEncoding.Uint32(buff) == 0xffffffff {
+			b.b = b.b[4:]
+		}
+	}
+}
+
 func (b *buffer) date(t *time.Time) bool {
 	if len(b.b) < 8 {
 		return false
@@ -634,6 +647,14 @@ func (b *body) readMechanism(m *mechanism) {
 				return false
 			}
 			m.params = p
+		case ckmECDSA, ckmRSAPKCS:
+			// Commit https://github.com/p11-glue/p11-kit/commit/6449cfe59b80344c87832c9e38afcb4df3f61c56
+			// (p11-kit 0.25.6+) removed the empty byte array added on those
+			// mechanism that do not have parameters. The following code will
+			// read an empty array if there is one in the buffer or leave the
+			// buffer as it was.
+			b.buffer.skipNullMarker()
+			m.params = []byte(nil)
 		default:
 			var p []byte
 			if !b.buffer.byteArray(&p) {
