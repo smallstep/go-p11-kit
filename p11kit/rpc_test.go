@@ -114,6 +114,61 @@ func TestBuffer(t *testing.T) {
 				bytes: []byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 			}},
 		},
+		{
+			// p11-kit 0.26.x serializes the IBM vendor attributes with
+			// explicit value types, not as byte arrays.
+			"attributeIBMRestrictableByte",
+			[]byte{
+				0x80, 0x01, 0x00, 0x01, // CKA_IBM_RESTRICTABLE
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x01, // length
+				0x01,
+			},
+			func(b *buffer) []interface{} {
+				var a attribute
+				if b.attribute(&a) {
+					return []interface{}{a}
+				}
+				return nil
+			},
+			[]interface{}{attribute{typ: attributeIBMRestrictable, byte: ptrByte(1)}},
+		},
+		{
+			"attributeIBMKeyTypeUlong",
+			[]byte{
+				0x80, 0x01, 0x00, 0x05, // CKA_IBM_KEYTYPE
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x08, // length
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+			},
+			func(b *buffer) []interface{} {
+				var a attribute
+				if b.attribute(&a) {
+					return []interface{}{a}
+				}
+				return nil
+			},
+			[]interface{}{attribute{typ: attributeIBMKeyType, ulong: ptrUint64(3)}},
+		},
+		{
+			// p11-kit encodes a NULL value with length 0 but still writes the
+			// value type's placeholder bytes.
+			"attributeByteZeroLength",
+			[]byte{
+				0x00, 0x00, 0x00, 0x01, // CKA_TOKEN
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x00, // length
+				0x00,
+			},
+			func(b *buffer) []interface{} {
+				var a attribute
+				if b.attribute(&a) {
+					return []interface{}{a}
+				}
+				return nil
+			},
+			[]interface{}{attribute{typ: attributeToken, byte: ptrByte(0)}},
+		},
 	}
 
 	for _, test := range tests {
@@ -125,6 +180,79 @@ func TestBuffer(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, test.want) {
 				t.Errorf("Decoding got=%#v, want=%#v", got, test.want)
+			}
+		})
+	}
+}
+
+func ptrByte(b byte) *byte       { return &b }
+func ptrUint64(n uint64) *uint64 { return &n }
+
+// TestBufferAttributeRejects covers attribute encodings that must fail to
+// decode rather than desynchronize the stream.
+func TestBufferAttributeRejects(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []byte
+	}{
+		{
+			// p11-kit serializes CKA_DERIVE_TEMPLATE as an attribute array,
+			// which is not supported.
+			"attributeArrayDeriveTemplate",
+			[]byte{
+				0x40, 0x00, 0x02, 0x13, // CKA_DERIVE_TEMPLATE
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x04, // length
+				0x00, 0x00, 0x00, 0x00,
+			},
+		},
+		{
+			// A ulong that the peer encoded as a byte array (or the reverse)
+			// must be rejected at the attribute boundary. p11-kit master
+			// encodes CKA_PARAMETER_SET as a ulong; 0.26.x as a byte array.
+			"ulongEncodedForByteArrayType",
+			[]byte{
+				0x00, 0x00, 0x06, 0x1d, // CKA_PARAMETER_SET
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x08, // length
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // ulong, not a byte array
+			},
+		},
+		{
+			"ulongLengthMismatch",
+			[]byte{
+				0x00, 0x00, 0x00, 0x00, // CKA_CLASS
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x04, // length
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+			},
+		},
+		{
+			"byteLengthMismatch",
+			[]byte{
+				0x00, 0x00, 0x00, 0x01, // CKA_TOKEN
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x02, // length
+				0x01, 0x01,
+			},
+		},
+		{
+			"byteArrayLengthMismatch",
+			[]byte{
+				0x00, 0x00, 0x00, 0x03, // CKA_LABEL
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x04, // length
+				0x00, 0x00, 0x00, 0x02, // byte array length
+				0x12, 0x34, 0x56, 0x78,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			b := newBuffer(test.in)
+			var a attribute
+			if b.attribute(&a) {
+				t.Errorf("attribute() decoded %#v, expected failure", a)
 			}
 		})
 	}

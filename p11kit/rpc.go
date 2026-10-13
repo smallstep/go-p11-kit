@@ -293,6 +293,9 @@ func (b *buffer) attribute(a *attribute) bool {
 		return false
 	}
 
+	// decoded is the number of value bytes the value type's decoder read,
+	// compared against the declared length below.
+	var decoded uint32
 	attr := attribute{typ: attributeType(typ)}
 	switch attr.typ.valueType() {
 	case attributeTypeByte:
@@ -303,6 +306,7 @@ func (b *buffer) attribute(a *attribute) bool {
 			return false
 		}
 		attr.byte = &n
+		decoded = 1
 	case attributeTypeUlong:
 		// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L891
 		// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L1097
@@ -311,6 +315,7 @@ func (b *buffer) attribute(a *attribute) bool {
 			return false
 		}
 		attr.ulong = &n
+		decoded = 8
 	case attributeTypeMechanismArray:
 		// TODO(ericchiang): implement
 		return false
@@ -322,6 +327,7 @@ func (b *buffer) attribute(a *attribute) bool {
 			return false
 		}
 		attr.date = &t
+		decoded = 8
 	case attributeTypeByteArray:
 		// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L895
 		// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L1211
@@ -330,7 +336,19 @@ func (b *buffer) attribute(a *attribute) bool {
 			return false
 		}
 		attr.bytes = arr
+		decoded = uint32(len(arr))
 	default:
+		return false
+	}
+	// p11-kit rejects an attribute whose declared length is shorter than the
+	// decoded value. Requiring an exact match also catches a value the peer
+	// encoded with a different value type than valueType() expects, which
+	// would otherwise desynchronize the rest of the message. A length of zero
+	// is a NULL value: p11-kit still writes the value type's placeholder
+	// bytes for it.
+	//
+	// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-message.c#L1419
+	if length != 0 && length != decoded {
 		return false
 	}
 	*a = attr
