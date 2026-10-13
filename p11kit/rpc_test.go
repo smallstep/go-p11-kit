@@ -91,6 +91,29 @@ func TestBuffer(t *testing.T) {
 				time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 			},
 		},
+		{
+			// p11-kit serializes attribute types it does not know as byte arrays.
+			// NSS 3.130 sends 0x624 in C_FindObjectsInit templates.
+			"attributeUnknownType",
+			[]byte{
+				0x00, 0x00, 0x06, 0x24, // type
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x08, // length
+				0x00, 0x00, 0x00, 0x08, // byte array length
+				0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			},
+			func(b *buffer) []interface{} {
+				var a attribute
+				if b.attribute(&a) {
+					return []interface{}{a}
+				}
+				return nil
+			},
+			[]interface{}{attribute{
+				typ:   attributeType(0x624),
+				bytes: []byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			}},
+		},
 	}
 
 	for _, test := range tests {

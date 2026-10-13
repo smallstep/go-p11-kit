@@ -707,7 +707,10 @@ func (a attributeType) valueType() int {
 		attributeSupportedCMSAttributes:
 		return attributeTypeByteArray
 	default:
-		return 0
+		// p11-kit serializes unknown attribute types as byte arrays.
+		//
+		// https://github.com/p11-glue/p11-kit/blob/0.26.2/p11-kit/rpc-message.c#L867
+		return attributeTypeByteArray
 	}
 }
 
