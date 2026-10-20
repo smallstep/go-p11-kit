@@ -77,19 +77,77 @@ func TestBuffer(t *testing.T) {
 			[]interface{}{[]byte{0x12, 0x34}},
 		},
 		{
+			// p11-kit encodes a CK_DATE as a byte array, length prefix included.
 			"date",
-			[]byte("12341230" + "20210101"),
+			[]byte("\x00\x00\x00\x08" + "12341230" + "\x00\x00\x00\x08" + "20210101"),
 			func(b *buffer) []interface{} {
 				var t1, t2 time.Time
-				if b.date(&t1) && b.date(&t2) {
-					return []interface{}{t1, t2}
+				var empty1, empty2 bool
+				if b.date(&t1, &empty1) && b.date(&t2, &empty2) {
+					return []interface{}{t1, empty1, t2, empty2}
 				}
 				return nil
 			},
 			[]interface{}{
-				time.Date(1234, 12, 30, 0, 0, 0, 0, time.UTC),
-				time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
+				time.Date(1234, 12, 30, 0, 0, 0, 0, time.UTC), false,
+				time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC), false,
 			},
+		},
+		{
+			// An empty date arrives as a zero-length byte array, or as the NULL
+			// marker when the client passed no value.
+			"dateEmpty",
+			[]byte{
+				0x00, 0x00, 0x00, 0x00,
+				0xff, 0xff, 0xff, 0xff,
+			},
+			func(b *buffer) []interface{} {
+				var t1, t2 time.Time
+				var empty1, empty2 bool
+				if b.date(&t1, &empty1) && b.date(&t2, &empty2) {
+					return []interface{}{empty1, empty2}
+				}
+				return nil
+			},
+			[]interface{}{true, true},
+		},
+		{
+			// The bytes p11-kit sends for CKA_START_DATE in a template.
+			"attributeDate",
+			append([]byte{
+				0x00, 0x00, 0x01, 0x10, // CKA_START_DATE
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x08, // length: sizeof(CK_DATE)
+				0x00, 0x00, 0x00, 0x08, // byte array length
+			}, []byte("20210101")...),
+			func(b *buffer) []interface{} {
+				var a attribute
+				if b.attribute(&a) {
+					return []interface{}{a}
+				}
+				return nil
+			},
+			[]interface{}{attribute{
+				typ:  attributeStartDate,
+				date: ptrTime(time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)),
+			}},
+		},
+		{
+			"attributeDateEmpty",
+			[]byte{
+				0x00, 0x00, 0x01, 0x11, // CKA_END_DATE
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x00, // length
+				0xff, 0xff, 0xff, 0xff, // NULL byte array
+			},
+			func(b *buffer) []interface{} {
+				var a attribute
+				if b.attribute(&a) {
+					return []interface{}{a}
+				}
+				return nil
+			},
+			[]interface{}{attribute{typ: attributeEndDate}},
 		},
 		{
 			// p11-kit serializes attribute types it does not know as byte arrays.
@@ -185,8 +243,9 @@ func TestBuffer(t *testing.T) {
 	}
 }
 
-func ptrByte(b byte) *byte       { return &b }
-func ptrUint64(n uint64) *uint64 { return &n }
+func ptrByte(b byte) *byte           { return &b }
+func ptrUint64(n uint64) *uint64     { return &n }
+func ptrTime(t time.Time) *time.Time { return &t }
 
 // TestBufferAttributeRejects covers attribute encodings that must fail to
 // decode rather than desynchronize the stream.
@@ -234,6 +293,26 @@ func TestBufferAttributeRejects(t *testing.T) {
 				0x01,                   // validity
 				0x00, 0x00, 0x00, 0x02, // length
 				0x01, 0x01,
+			},
+		},
+		{
+			// A date without the byte array length prefix p11-kit always writes.
+			"dateWithoutLengthPrefix",
+			append([]byte{
+				0x00, 0x00, 0x01, 0x10, // CKA_START_DATE
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x08, // length
+			}, []byte("20210101")...),
+		},
+		{
+			// p11-kit only accepts a date of zero or eight characters.
+			"dateWrongLength",
+			[]byte{
+				0x00, 0x00, 0x01, 0x10, // CKA_START_DATE
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x04, // length
+				0x00, 0x00, 0x00, 0x04, // byte array length
+				0x32, 0x30, 0x32, 0x31,
 			},
 		},
 		{
@@ -301,7 +380,7 @@ func TestBufferAdd(t *testing.T) {
 				t = time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
 				b.addDate(t)
 			},
-			[]byte("12341230" + "20210101"),
+			[]byte("\x00\x00\x00\x08" + "12341230" + "\x00\x00\x00\x08" + "20210101"),
 		},
 		{
 			"addAttributeByte",
@@ -360,9 +439,10 @@ func TestBufferAdd(t *testing.T) {
 				})
 			},
 			[]byte{
-				0x00, 0x00, 0x01, 0x10,
-				0x01,
-				0x00, 0x00, 0x00, 0x08,
+				0x00, 0x00, 0x01, 0x10, // CKA_START_DATE
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x08, // length: sizeof(CK_DATE)
+				0x00, 0x00, 0x00, 0x08, // byte array length
 				0x31, 0x32, 0x33, 0x34, 0x31, 0x32, 0x33, 0x30,
 			},
 		},
