@@ -880,6 +880,22 @@ func readByte(r io.Reader) (byte, error) {
 	return buf[0], err
 }
 
+// ProtocolVersionError is the error generated when a client attempts to speak
+// an unsupported protocol version.
+//
+// Deprecated: [Handler.Handle] no longer returns ProtocolVersionError. It
+// agrees on a protocol version with any client, answering with the lower of
+// the client's version and the highest version the package speaks.
+type ProtocolVersionError struct {
+	Version     byte
+	PeerVersion byte
+}
+
+// Error implements the error interface on [ProtocolVersionError].
+func (e *ProtocolVersionError) Error() string {
+	return fmt.Sprintf("client attempting to speak unsupported protocol version: %d", e.PeerVersion)
+}
+
 // protocolVersionMax is the highest RPC protocol version the handler speaks.
 // p11-kit's versions differ only in the call codes of functions this package
 // does not implement: version 1 moves C_InitToken to C_InitToken2, and version
