@@ -739,6 +739,11 @@ func (h *handler) handleSignInit(req *body) (*body, error) {
 	)
 	req.readUlong(&sessionID)
 	req.readMechanism(&m)
+	if m.unparsed {
+		// No key signs with this mechanism, and the key handle that follows
+		// it cannot be read past parameters that were not decoded.
+		return nil, fmt.Errorf("unsupported mechanism %s: %w", m, errMechanismInvalid)
+	}
 	req.readUlong(&keyID)
 	if err := req.err(); err != nil {
 		return nil, err

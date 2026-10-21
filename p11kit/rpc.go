@@ -716,11 +716,19 @@ func (b *body) readMechanism(m *mechanism) {
 			b.buffer.skipNullMarker()
 			m.params = []byte(nil)
 		default:
-			var p []byte
-			if !b.buffer.byteArray(&p) {
-				return false
-			}
-			m.params = p
+			// Only the mechanisms above can be used to sign, and p11-kit
+			// encodes every other mechanism's parameters in its own way:
+			// since 0.25.6 a mechanism without parameters is sent with no
+			// parameter bytes at all, and one with parameters with a marker
+			// byte and a type-specific encoding. Rather than decode them, the
+			// rest of the request is discarded and the caller answers
+			// CKR_MECHANISM_INVALID. Requests are framed by length, so the
+			// connection stays in step.
+			//
+			// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-message.c#L2597
+			m.unparsed = true
+			b.buffer = newBuffer(nil)
+			b.signature = ""
 		}
 		return true
 

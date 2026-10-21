@@ -16,6 +16,7 @@ package p11kit
 
 import (
 	"bytes"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -467,6 +468,99 @@ func TestBufferAdd(t *testing.T) {
 			got := b.bytes()
 			if !bytes.Equal(got, test.want) {
 				t.Errorf("bytes() got=%x, want=%x", got, test.want)
+			}
+		})
+	}
+}
+
+// signInitRequest builds the body of a C_SignInit request as p11-kit sends it:
+// session 1, the mechanism type, the mechanism's parameter bytes as given, and
+// key handle 2.
+func signInitRequest(mech uint32, params []byte) *body {
+	var b buffer
+	b.addUint64(1)
+	b.addUint32(mech)
+	b.b = append(b.b, params...)
+	b.addUint64(2)
+	return &body{call: callSignInit, signature: "uMu", buffer: b}
+}
+
+func pssParams(hash, mgf, salt uint64) []byte {
+	var b buffer
+	b.addUint64(hash)
+	b.addUint64(mgf)
+	b.addUint64(salt)
+	return b.bytes()
+}
+
+// TestSignInitUnsupportedMechanism pins that C_SignInit with a mechanism no key
+// signs with is answered with CKR_MECHANISM_INVALID, which keeps the connection,
+// whatever encoding p11-kit used for its parameters. Read as a byte array,
+// p11-kit 0.25.6's encodings and typed parameters such as PSS's misread the
+// request, which then fails to decode and closes the connection.
+func TestSignInitUnsupportedMechanism(t *testing.T) {
+	const (
+		ckmSHA256RSAPKCS    = 0x40
+		ckmSHA256RSAPKCSPSS = 0x43
+		ckmECDSASHA256      = 0x1044
+	)
+	tests := []struct {
+		name   string
+		mech   uint32
+		params []byte
+	}{
+		// p11-kit 0.25.6 and later send nothing for a mechanism without
+		// parameters.
+		{"ECDSA-SHA256 p11-kit 0.26", ckmECDSASHA256, nil},
+		// Earlier releases send an empty (NULL) byte array.
+		{"SHA256-RSA-PKCS p11-kit 0.24", ckmSHA256RSAPKCS, []byte{0xff, 0xff, 0xff, 0xff}},
+		// 0.25.6 and later prefix parameters with a marker byte.
+		{"SHA256-RSA-PKCS-PSS p11-kit 0.26", ckmSHA256RSAPKCSPSS, append([]byte{0x01}, pssParams(0x250, 0x2, 32)...)},
+		{"SHA256-RSA-PKCS-PSS p11-kit 0.25.3", ckmSHA256RSAPKCSPSS, pssParams(0x250, 0x2, 32)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			h := &handler{s: &Handler{}}
+			_, err := h.handleSignInit(signInitRequest(test.mech, test.params))
+			var perr pkcs11Error
+			if !errors.As(err, &perr) || perr != errMechanismInvalid {
+				t.Fatalf("handleSignInit() error = %v, want %v", err, errMechanismInvalid)
+			}
+		})
+	}
+}
+
+// TestReadSignMechanism pins that the mechanisms keys sign with still decode
+// in both of p11-kit's encodings, leaving the key handle after them readable.
+func TestReadSignMechanism(t *testing.T) {
+	pss := rsaPKCSPSSParams{hashAlg: 0x250, mgf: 0x2, saltLen: 32}
+	tests := []struct {
+		name   string
+		mech   uint32
+		params []byte
+		want   interface{}
+	}{
+		{"ECDSA p11-kit 0.26", ckmECDSA, nil, []byte(nil)},
+		{"ECDSA p11-kit 0.24", ckmECDSA, []byte{0xff, 0xff, 0xff, 0xff}, []byte(nil)},
+		{"RSA-PKCS p11-kit 0.26", ckmRSAPKCS, nil, []byte(nil)},
+		{"RSA-PKCS-PSS p11-kit 0.26", ckmRSAPKCSPSS, append([]byte{0x01}, pssParams(0x250, 0x2, 32)...), pss},
+		{"RSA-PKCS-PSS p11-kit 0.24", ckmRSAPKCSPSS, pssParams(0x250, 0x2, 32), pss},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := signInitRequest(test.mech, test.params)
+			var (
+				session, key uint64
+				m            mechanism
+			)
+			req.readUlong(&session)
+			req.readMechanism(&m)
+			req.readUlong(&key)
+			if err := req.err(); err != nil {
+				t.Fatalf("decoding: %v", err)
+			}
+			if m.unparsed || m.typ != test.mech || !reflect.DeepEqual(m.params, test.want) || key != 2 {
+				t.Errorf("got mechanism %#v and key %d, want type 0x%x, params %#v and key 2", m, key, test.mech, test.want)
 			}
 		})
 	}

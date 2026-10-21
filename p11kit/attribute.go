@@ -536,6 +536,10 @@ var mechanismToString = map[uint32]string{
 type mechanism struct {
 	typ    uint32
 	params interface{}
+	// unparsed reports a mechanism whose parameters readMechanism did not
+	// decode. The request it came in was discarded from there on, so nothing
+	// after the mechanism can be read from it.
+	unparsed bool
 }
 
 func (m mechanism) noParams() bool {
