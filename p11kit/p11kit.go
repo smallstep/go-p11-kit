@@ -739,6 +739,11 @@ func (h *handler) handleSignInit(req *body) (*body, error) {
 	)
 	req.readUlong(&sessionID)
 	req.readMechanism(&m)
+	if m.unparsed {
+		// No key signs with this mechanism, and the key handle that follows
+		// it cannot be read past parameters that were not decoded.
+		return nil, fmt.Errorf("unsupported mechanism %s: %w", m, errMechanismInvalid)
+	}
 	req.readUlong(&keyID)
 	if err := req.err(); err != nil {
 		return nil, err
@@ -875,23 +880,33 @@ func readByte(r io.Reader) (byte, error) {
 	return buf[0], err
 }
 
+// protocolVersionMax is the highest RPC protocol version the handler speaks.
+// p11-kit's versions differ only in the call codes of functions this package
+// does not implement: version 1 moves C_InitToken to C_InitToken2, and version
+// 2 moves C_DeriveKey to C_DeriveKey2. A request for either is answered with
+// CKR_FUNCTION_NOT_SUPPORTED whatever its code, so every version up to 2 is
+// served the same way.
+//
+// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-client.c#L1090
+// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-client.c#L1990
+const protocolVersionMax byte = 2
+
+// negotiateProtocolVersion answers the version byte a client opens with,
+// agreeing on the lower of its version and protocolVersionMax, as p11-kit's
+// own server does. A p11-kit client offers its maximum (2 since p11-kit 0.25)
+// and speaks whichever version comes back.
+//
+// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-server.c#L2567
 func negotiateProtocolVersion(rw io.ReadWriter) error {
-	// Negotiation logic can be found at:
-	//
-	// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-server.c#L1944
 	peerVersion, err := readByte(rw)
 	if err != nil {
 		return fmt.Errorf("reading protocol version: %w", err)
 	}
-	// Protocol used by the current P11 kit.
-	const protocolVersion byte = 0
-	if peerVersion != protocolVersion {
-		return &ProtocolVersionError{
-			Version:     protocolVersion,
-			PeerVersion: peerVersion,
-		}
+	version := peerVersion
+	if version > protocolVersionMax {
+		version = protocolVersionMax
 	}
-	if err := writeByte(rw, protocolVersion); err != nil {
+	if err := writeByte(rw, version); err != nil {
 		return fmt.Errorf("writing protocol version: %w", err)
 	}
 	return nil
