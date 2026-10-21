@@ -23,6 +23,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/asn1"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -135,6 +136,22 @@ func (o *Object) attributeValue(typ attributeType) (attribute, bool) {
 }
 
 func (o *Object) sign(m mechanism, data []byte) ([]byte, error) {
+	sig, err := o.signMechanism(m, data)
+	if err != nil {
+		// Handle closes the connection on an error without a PKCS #11 return
+		// value, and p11-kit doesn't connect again, so the token would stay
+		// unavailable. Report a signer that failed, such as one whose KMS is
+		// unreachable, as CKR_FUNCTION_FAILED instead.
+		var cerr pkcs11Error
+		if !errors.As(err, &cerr) {
+			return nil, fmt.Errorf("%v: %w", err, errFunctionFailed)
+		}
+		return nil, err
+	}
+	return sig, nil
+}
+
+func (o *Object) signMechanism(m mechanism, data []byte) ([]byte, error) {
 	if o.priv == nil {
 		return nil, fmt.Errorf("object isn't a private key: %w", errKeyHandleInvalid)
 	}
@@ -151,7 +168,9 @@ func (o *Object) sign(m mechanism, data []byte) ([]byte, error) {
 	}
 }
 
+// hashLengths maps the length of a digest to the hash that produces it.
 var hashLengths = map[int]crypto.Hash{
+	crypto.SHA224.Size(): crypto.SHA224,
 	crypto.SHA256.Size(): crypto.SHA256,
 	crypto.SHA384.Size(): crypto.SHA384,
 	crypto.SHA512.Size(): crypto.SHA512,
@@ -162,7 +181,18 @@ func signECDSA(priv crypto.Signer, m mechanism, data []byte) ([]byte, error) {
 	if !m.noParams() {
 		return nil, fmt.Errorf("CKM_ECDSA does not take any parameters: %w", errArgumentsBad)
 	}
-	sig, err := priv.Sign(rand.Reader, data, crypto.Hash(0))
+
+	// CKM_ECDSA signs a digest computed by the client, and doesn't say which
+	// hash computed it. Since Go 1.27, ecdsa.PrivateKey.Sign rejects
+	// crypto.Hash(0) and any hash whose size isn't the digest's length, so
+	// name the hash by the length. The signature doesn't depend on which hash
+	// it is, only on the digest. SHA-1 isn't named, as for CKM_RSA_PKCS, so a
+	// signer that requires a hash refuses a SHA-1 digest.
+	opts := crypto.Hash(0)
+	if h, ok := hashLengths[len(data)]; ok {
+		opts = h
+	}
+	sig, err := priv.Sign(rand.Reader, data, opts)
 	if err != nil {
 		return nil, err
 	}
