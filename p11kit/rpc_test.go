@@ -17,6 +17,7 @@ package p11kit
 import (
 	"bytes"
 	"errors"
+	"net"
 	"reflect"
 	"testing"
 	"time"
@@ -211,7 +212,8 @@ func TestBuffer(t *testing.T) {
 		},
 		{
 			// p11-kit encodes a NULL value with length 0 but still writes the
-			// value type's placeholder bytes.
+			// value type's placeholder bytes. The attribute has no value, as
+			// p11-kit's own server decodes it.
 			"attributeByteZeroLength",
 			[]byte{
 				0x00, 0x00, 0x00, 0x01, // CKA_TOKEN
@@ -226,7 +228,43 @@ func TestBuffer(t *testing.T) {
 				}
 				return nil
 			},
-			[]interface{}{attribute{typ: attributeToken, byte: ptrByte(0)}},
+			[]interface{}{attribute{typ: attributeToken}},
+		},
+		{
+			// p11-kit writes a NULL byte array for a value with no data, with
+			// whatever length the client declared.
+			"attributeByteArrayNullWithLength",
+			[]byte{
+				0x00, 0x00, 0x00, 0x03, // CKA_LABEL
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x05, // length
+				0xff, 0xff, 0xff, 0xff, // NULL byte array
+			},
+			decodeAttribute,
+			[]interface{}{attribute{typ: attributeLabel}},
+		},
+		{
+			"attributeDateNullWithLength",
+			[]byte{
+				0x00, 0x00, 0x01, 0x10, // CKA_START_DATE
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x08, // length
+				0xff, 0xff, 0xff, 0xff, // NULL byte array
+			},
+			decodeAttribute,
+			[]interface{}{attribute{typ: attributeStartDate}},
+		},
+		{
+			// An empty label is a value, unlike a NULL one.
+			"attributeByteArrayEmpty",
+			[]byte{
+				0x00, 0x00, 0x00, 0x03, // CKA_LABEL
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x00, // length
+				0x00, 0x00, 0x00, 0x00, // byte array length
+			},
+			decodeAttribute,
+			[]interface{}{attribute{typ: attributeLabel, bytes: []byte{}}},
 		},
 	}
 
@@ -242,6 +280,15 @@ func TestBuffer(t *testing.T) {
 			}
 		})
 	}
+}
+
+// decodeAttribute decodes a single attribute for TestBuffer.
+func decodeAttribute(b *buffer) []interface{} {
+	var a attribute
+	if b.attribute(&a) {
+		return []interface{}{a}
+	}
+	return nil
 }
 
 func ptrByte(b byte) *byte           { return &b }
@@ -314,6 +361,17 @@ func TestBufferAttributeRejects(t *testing.T) {
 				0x00, 0x00, 0x00, 0x04, // length
 				0x00, 0x00, 0x00, 0x04, // byte array length
 				0x32, 0x30, 0x32, 0x31,
+			},
+		},
+		{
+			// p11-kit never writes data for a value of length 0.
+			"byteArrayZeroLengthWithData",
+			[]byte{
+				0x00, 0x00, 0x00, 0x03, // CKA_LABEL
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x00, // length
+				0x00, 0x00, 0x00, 0x02, // byte array length
+				0x12, 0x34,
 			},
 		},
 		{
@@ -477,11 +535,16 @@ func TestBufferAdd(t *testing.T) {
 // session 1, the mechanism type, the mechanism's parameter bytes as given, and
 // key handle 2.
 func signInitRequest(mech uint32, params []byte) *body {
+	return signInitRequestKey(mech, params, 2)
+}
+
+// signInitRequestKey is signInitRequest with the given key handle.
+func signInitRequestKey(mech uint32, params []byte, key uint64) *body {
 	var b buffer
 	b.addUint64(1)
 	b.addUint32(mech)
 	b.b = append(b.b, params...)
-	b.addUint64(2)
+	b.addUint64(key)
 	return &body{call: callSignInit, signature: "uMu", buffer: b}
 }
 
@@ -534,21 +597,28 @@ func TestSignInitUnsupportedMechanism(t *testing.T) {
 // in both of p11-kit's encodings, leaving the key handle after them readable.
 func TestReadSignMechanism(t *testing.T) {
 	pss := rsaPKCSPSSParams{hashAlg: 0x250, mgf: 0x2, saltLen: 32}
+	// A key handle whose upper half looks like p11-kit 0.24's NULL marker.
+	const markerKey = 0xffffffff00000002
 	tests := []struct {
 		name   string
 		mech   uint32
 		params []byte
+		key    uint64
 		want   interface{}
 	}{
-		{"ECDSA p11-kit 0.26", ckmECDSA, nil, []byte(nil)},
-		{"ECDSA p11-kit 0.24", ckmECDSA, []byte{0xff, 0xff, 0xff, 0xff}, []byte(nil)},
-		{"RSA-PKCS p11-kit 0.26", ckmRSAPKCS, nil, []byte(nil)},
-		{"RSA-PKCS-PSS p11-kit 0.26", ckmRSAPKCSPSS, append([]byte{0x01}, pssParams(0x250, 0x2, 32)...), pss},
-		{"RSA-PKCS-PSS p11-kit 0.24", ckmRSAPKCSPSS, pssParams(0x250, 0x2, 32), pss},
+		{"ECDSA p11-kit 0.26", ckmECDSA, nil, 2, []byte(nil)},
+		{"ECDSA p11-kit 0.24", ckmECDSA, []byte{0xff, 0xff, 0xff, 0xff}, 2, []byte(nil)},
+		{"ECDSA p11-kit 0.24 empty array", ckmECDSA, []byte{0x00, 0x00, 0x00, 0x00}, 2, []byte(nil)},
+		{"ECDSA p11-kit 0.26 marker-like key", ckmECDSA, nil, markerKey, []byte(nil)},
+		{"ECDSA p11-kit 0.24 marker-like key", ckmECDSA, []byte{0xff, 0xff, 0xff, 0xff}, markerKey, []byte(nil)},
+		{"RSA-PKCS p11-kit 0.26", ckmRSAPKCS, nil, 2, []byte(nil)},
+		{"RSA-PKCS p11-kit 0.26 marker-like key", ckmRSAPKCS, nil, markerKey, []byte(nil)},
+		{"RSA-PKCS-PSS p11-kit 0.26", ckmRSAPKCSPSS, append([]byte{0x01}, pssParams(0x250, 0x2, 32)...), 2, pss},
+		{"RSA-PKCS-PSS p11-kit 0.24", ckmRSAPKCSPSS, pssParams(0x250, 0x2, 32), 2, pss},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			req := signInitRequest(test.mech, test.params)
+			req := signInitRequestKey(test.mech, test.params, test.key)
 			var (
 				session, key uint64
 				m            mechanism
@@ -559,9 +629,67 @@ func TestReadSignMechanism(t *testing.T) {
 			if err := req.err(); err != nil {
 				t.Fatalf("decoding: %v", err)
 			}
-			if m.unparsed || m.typ != test.mech || !reflect.DeepEqual(m.params, test.want) || key != 2 {
-				t.Errorf("got mechanism %#v and key %d, want type 0x%x, params %#v and key 2", m, key, test.mech, test.want)
+			if m.unparsed || m.typ != test.mech || !reflect.DeepEqual(m.params, test.want) || key != test.key {
+				t.Errorf("got mechanism %#v and key 0x%x, want type 0x%x, params %#v and key 0x%x", m, key, test.mech, test.want, test.key)
 			}
 		})
+	}
+}
+
+// TestHandleUndecodableAttribute checks that a C_FindObjectsInit template with
+// an attribute this package can't decode is answered with
+// CKR_ATTRIBUTE_VALUE_INVALID, and that the connection still serves requests.
+func TestHandleUndecodableAttribute(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- (&Handler{}).Handle(server)
+		server.Close()
+	}()
+
+	if _, err := client.Write([]byte{2}); err != nil {
+		t.Fatalf("writing protocol version: %v", err)
+	}
+	if _, err := readByte(client); err != nil {
+		t.Fatalf("reading protocol version: %v", err)
+	}
+
+	// p11-kit encodes CKA_DERIVE_TEMPLATE as an attribute array, which this
+	// package can't decode.
+	var buf buffer
+	buf.addUint64(1) // Session ID.
+	buf.addUint32(1) // Number of attributes.
+	buf.Write([]byte{
+		0x40, 0x00, 0x02, 0x13, // CKA_DERIVE_TEMPLATE
+		0x01,                   // validity
+		0x00, 0x00, 0x00, 0x04, // length
+		0x00, 0x00, 0x00, 0x00, // attribute array count
+	})
+	req := &body{call: callFindObjectsInit, signature: sigUlong + sigAttributeArray, buffer: buf}
+	if err := writeResponse(client, 1, req); err != nil {
+		t.Fatalf("writing C_FindObjectsInit: %v", err)
+	}
+	_, resp, err := readRequest(client)
+	if err != nil {
+		t.Fatalf("reading C_FindObjectsInit response: %v", err)
+	}
+	var code uint64
+	resp.readUlong(&code)
+	if resp.call != callError || pkcs11Error(code) != errAttributeValueInvalid {
+		t.Errorf("C_FindObjectsInit response = %s %v, want %s %v", resp.call, pkcs11Error(code), callError, errAttributeValueInvalid)
+	}
+
+	if err := writeResponse(client, 2, &body{call: callFinalize}); err != nil {
+		t.Fatalf("writing C_Finalize: %v", err)
+	}
+	if _, resp, err = readRequest(client); err != nil {
+		t.Fatalf("reading C_Finalize response: %v", err)
+	}
+	if resp.call != callFinalize {
+		t.Errorf("C_Finalize response = %s, want %s", resp.call, callFinalize)
+	}
+	if err := <-done; err != nil {
+		t.Errorf("Handle() = %v, want nil", err)
 	}
 }
