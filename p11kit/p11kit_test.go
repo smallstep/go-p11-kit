@@ -632,16 +632,21 @@ func TestSignECDSAOpts(t *testing.T) {
 	}
 }
 
-// curveSchemeHash is the hash go-attestation creates a TPM ECDSA key's signing
-// scheme with, by curve.
+// curveSchemeHash is the hash a TPM ECDSA key's signing scheme pairs with its
+// curve, as go-attestation creates the key, for each curve this package
+// supports.
 func curveSchemeHash(pub *ecdsa.PublicKey) crypto.Hash {
-	switch bits := pub.Params().BitSize; {
-	case bits <= 256:
+	switch pub.Curve {
+	case elliptic.P224():
+		return crypto.SHA224
+	case elliptic.P256():
 		return crypto.SHA256
-	case bits <= 384:
+	case elliptic.P384():
 		return crypto.SHA384
-	default:
+	case elliptic.P521():
 		return crypto.SHA512
+	default:
+		return crypto.Hash(0)
 	}
 }
 
