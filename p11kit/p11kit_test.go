@@ -24,6 +24,7 @@ import (
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net"
 	"os"
@@ -459,6 +460,35 @@ func TestPKCS11Tool(t *testing.T) {
 			}
 			if test.after != nil {
 				test.after(t)
+			}
+		})
+	}
+}
+
+// TestNegotiateProtocolVersion pins the version byte the handler answers with:
+// the client's own up to version 2, and 2 for anything newer.
+func TestNegotiateProtocolVersion(t *testing.T) {
+	tests := []struct {
+		peer, want byte
+	}{
+		{0, 0},
+		{1, 1},
+		{2, 2},
+		{3, 2},
+		{255, 2},
+	}
+	for _, test := range tests {
+		t.Run(strconv.Itoa(int(test.peer)), func(t *testing.T) {
+			var out bytes.Buffer
+			rw := struct {
+				io.Reader
+				io.Writer
+			}{bytes.NewReader([]byte{test.peer}), &out}
+			if err := negotiateProtocolVersion(rw); err != nil {
+				t.Fatalf("negotiateProtocolVersion: %v", err)
+			}
+			if got := out.Bytes(); !bytes.Equal(got, []byte{test.want}) {
+				t.Errorf("answered %v, want [%d]", got, test.want)
 			}
 		})
 	}

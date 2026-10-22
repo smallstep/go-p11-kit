@@ -213,7 +213,8 @@ func (b *buffer) addAttribute(a attribute) {
 	// length twice, in this case it will be "len(val) - 4" the extra 4 bytes of
 	// the length prefix in the byte array. See links above.
 	length := uint32(len(val))
-	if a.typ.valueType() == attributeTypeByteArray {
+	switch a.typ.valueType() {
+	case attributeTypeByteArray, attributeTypeDate:
 		length -= 4
 	}
 	b.addByte(1)
@@ -243,8 +244,12 @@ func (b *buffer) addByte(by byte) {
 	b.b = append(b.b, by)
 }
 
-// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L998
+// addDate encodes a CK_DATE the way p11-kit does: a byte array holding the
+// eight characters YYYYMMDD, so prefixed with its length.
+//
+// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-message.c#L1151
 func (b *buffer) addDate(t time.Time) {
+	b.addUint32(8)
 	year := uint64(t.Year())
 	month := uint64(t.Month())
 	day := uint64(t.Day())
@@ -293,6 +298,9 @@ func (b *buffer) attribute(a *attribute) bool {
 		return false
 	}
 
+	// decoded is the number of value bytes the value type's decoder read,
+	// compared against the declared length below.
+	var decoded uint32
 	attr := attribute{typ: attributeType(typ)}
 	switch attr.typ.valueType() {
 	case attributeTypeByte:
@@ -303,6 +311,7 @@ func (b *buffer) attribute(a *attribute) bool {
 			return false
 		}
 		attr.byte = &n
+		decoded = 1
 	case attributeTypeUlong:
 		// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L891
 		// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L1097
@@ -311,17 +320,23 @@ func (b *buffer) attribute(a *attribute) bool {
 			return false
 		}
 		attr.ulong = &n
+		decoded = 8
 	case attributeTypeMechanismArray:
 		// TODO(ericchiang): implement
 		return false
 	case attributeTypeDate:
-		// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L894
-		// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L1182
-		var t time.Time
-		if !b.date(&t) {
+		// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-message.c#L1317
+		var (
+			t     time.Time
+			empty bool
+		)
+		if !b.date(&t, &empty) {
 			return false
 		}
-		attr.date = &t
+		if !empty {
+			attr.date = &t
+			decoded = 8
+		}
 	case attributeTypeByteArray:
 		// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L895
 		// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L1211
@@ -330,7 +345,19 @@ func (b *buffer) attribute(a *attribute) bool {
 			return false
 		}
 		attr.bytes = arr
+		decoded = uint32(len(arr))
 	default:
+		return false
+	}
+	// p11-kit rejects an attribute whose declared length is shorter than the
+	// decoded value. Requiring an exact match also catches a value the peer
+	// encoded with a different value type than valueType() expects, which
+	// would otherwise desynchronize the rest of the message. A length of zero
+	// is a NULL value: p11-kit still writes the value type's placeholder
+	// bytes for it.
+	//
+	// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-message.c#L1419
+	if length != 0 && length != decoded {
 		return false
 	}
 	*a = attr
@@ -407,24 +434,39 @@ func (b *buffer) skipByteMarker(marker byte) {
 	}
 }
 
-func (b *buffer) date(t *time.Time) bool {
-	if len(b.b) < 8 {
+// date decodes a CK_DATE the way p11-kit encodes it: a byte array that is
+// either the eight characters YYYYMMDD or empty. empty reports an empty date,
+// which PKCS #11 allows for CKA_START_DATE and CKA_END_DATE and which p11-kit
+// sends as a zero-length or NULL byte array; t is left unset then.
+//
+// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-message.c#L1317
+func (b *buffer) date(t *time.Time, empty *bool) bool {
+	var arr []byte
+	if !b.byteArray(&arr) {
 		return false
 	}
-	year, err := strconv.ParseUint(string(b.b[:4]), 10, 64)
+	switch len(arr) {
+	case 0:
+		*empty = true
+		return true
+	case 8:
+	default:
+		return false
+	}
+	year, err := strconv.ParseUint(string(arr[:4]), 10, 64)
 	if err != nil {
 		return false
 	}
-	month, err := strconv.ParseUint(string(b.b[4:6]), 10, 64)
+	month, err := strconv.ParseUint(string(arr[4:6]), 10, 64)
 	if err != nil {
 		return false
 	}
-	day, err := strconv.ParseUint(string(b.b[6:8]), 10, 64)
+	day, err := strconv.ParseUint(string(arr[6:8]), 10, 64)
 	if err != nil {
 		return false
 	}
 	*t = time.Date(int(year), time.Month(month), int(day), 0, 0, 0, 0, time.UTC)
-	b.b = b.b[8:]
+	*empty = false
 	return true
 }
 
@@ -674,11 +716,19 @@ func (b *body) readMechanism(m *mechanism) {
 			b.buffer.skipNullMarker()
 			m.params = []byte(nil)
 		default:
-			var p []byte
-			if !b.buffer.byteArray(&p) {
-				return false
-			}
-			m.params = p
+			// Only the mechanisms above can be used to sign, and p11-kit
+			// encodes every other mechanism's parameters in its own way:
+			// since 0.25.6 a mechanism without parameters is sent with no
+			// parameter bytes at all, and one with parameters with a marker
+			// byte and a type-specific encoding. Rather than decode them, the
+			// rest of the request is discarded and the caller answers
+			// CKR_MECHANISM_INVALID. Requests are framed by length, so the
+			// connection stays in step.
+			//
+			// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-message.c#L2597
+			m.unparsed = true
+			b.buffer = newBuffer(nil)
+			b.signature = ""
 		}
 		return true
 

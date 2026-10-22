@@ -536,6 +536,10 @@ var mechanismToString = map[uint32]string{
 type mechanism struct {
 	typ    uint32
 	params interface{}
+	// unparsed reports a mechanism whose parameters readMechanism did not
+	// decode. The request it came in was discarded from there on, so nothing
+	// after the mechanism can be read from it.
+	unparsed bool
 }
 
 func (m mechanism) noParams() bool {
@@ -610,7 +614,14 @@ const (
 	attributeTypeByteArray
 )
 
-// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L782
+// valueType returns the wire encoding p11-kit uses for an attribute value.
+// The table mirrors map_attribute_to_value_type in p11-kit 0.26.5. p11-kit
+// master additionally encodes CKA_ENCAPSULATE and CKA_DECAPSULATE as bytes,
+// CKA_PARAMETER_SET and CKA_HSS_* as ulongs, and CKA_ENCAPSULATE_TEMPLATE and
+// CKA_DECAPSULATE_TEMPLATE as attribute arrays; those are left on the byte
+// array default until they ship in a release.
+//
+// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-message.c#L796
 func (a attributeType) valueType() int {
 	switch a {
 	case attributeToken,
@@ -637,7 +648,14 @@ func (a attributeType) valueType() int {
 		attributeWrapWithTrusted,
 		attributeResetOnInit,
 		attributeHasReset,
-		attributeColor:
+		attributeColor,
+		attributeIBMRestrictable,
+		attributeIBMNeverModifiable,
+		attributeIBMRetainKey,
+		attributeIBMAttrBound,
+		attributeIBMUseAsData,
+		attributeIBMProtkeyExtractable,
+		attributeIBMProtkeyNeverExtractable:
 		return attributeTypeByte
 	case attributeClass,
 		attributeCertificateType,
@@ -658,10 +676,16 @@ func (a attributeType) valueType() int {
 		attributeCharRows,
 		attributeCharColumns,
 		attributeBitsPerPixel,
-		attributeMechanismType:
+		attributeMechanismType,
+		attributeIBMDilithiumKeyform,
+		attributeIBMCCAAESKeyMode,
+		attributeIBMStdCompliance1,
+		attributeIBMKeyType,
+		attributeIBMKyberKeyform:
 		return attributeTypeUlong
 	case attributeWrapTemplate,
-		attributeUnwrapTemplate:
+		attributeUnwrapTemplate,
+		attributeDeriveTemplate:
 		// TODO(ericchiang): support P11_RPC_VALUE_ATTRIBUTE_ARRAY
 		return 0
 	case attributeAllowedMechanisms:
@@ -707,7 +731,12 @@ func (a attributeType) valueType() int {
 		attributeSupportedCMSAttributes:
 		return attributeTypeByteArray
 	default:
-		return 0
+		// p11-kit serializes unknown attribute types as byte arrays. The
+		// IBM vendor attributes that p11-kit lists as byte arrays also land
+		// here.
+		//
+		// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-message.c#L867
+		return attributeTypeByteArray
 	}
 }
 
@@ -844,7 +873,26 @@ const (
 	attributeDefaultCMSAttributes   attributeType = 0x00000502
 	attributeSupportedCMSAttributes attributeType = 0x00000503
 	attributeAllowedMechanisms      attributeType = 0x40000600
+	attributeDeriveTemplate         attributeType = 0x40000213
 	attributeVendorDefined          attributeType = 0x80000000
+)
+
+// IBM vendor attributes that p11-kit serializes with an explicit value type.
+//
+// https://github.com/p11-glue/p11-kit/blob/0.26.5/common/pkcs11x.h#L200
+const (
+	attributeIBMRestrictable            attributeType = attributeVendorDefined + 0x10001
+	attributeIBMNeverModifiable         attributeType = attributeVendorDefined + 0x10002
+	attributeIBMRetainKey               attributeType = attributeVendorDefined + 0x10003
+	attributeIBMAttrBound               attributeType = attributeVendorDefined + 0x10004
+	attributeIBMKeyType                 attributeType = attributeVendorDefined + 0x10005
+	attributeIBMUseAsData               attributeType = attributeVendorDefined + 0x10008
+	attributeIBMStdCompliance1          attributeType = attributeVendorDefined + 0x1000a
+	attributeIBMProtkeyExtractable      attributeType = attributeVendorDefined + 0x1000c
+	attributeIBMProtkeyNeverExtractable attributeType = attributeVendorDefined + 0x1000d
+	attributeIBMDilithiumKeyform        attributeType = attributeVendorDefined + 0xd0001
+	attributeIBMKyberKeyform            attributeType = attributeVendorDefined + 0xd0009
+	attributeIBMCCAAESKeyMode           attributeType = attributeVendorDefined + 0xd0101
 )
 
 var attributeString = map[attributeType]string{
@@ -935,5 +983,19 @@ var attributeString = map[attributeType]string{
 	attributeDefaultCMSAttributes:   "CKA_DEFAULT_CMS_ATTRIBUTES",
 	attributeSupportedCMSAttributes: "CKA_SUPPORTED_CMS_ATTRIBUTES",
 	attributeAllowedMechanisms:      "CKA_ALLOWED_MECHANISMS",
+	attributeDeriveTemplate:         "CKA_DERIVE_TEMPLATE",
 	attributeVendorDefined:          "CKA_VENDOR_DEFINED",
+
+	attributeIBMRestrictable:            "CKA_IBM_RESTRICTABLE",
+	attributeIBMNeverModifiable:         "CKA_IBM_NEVER_MODIFIABLE",
+	attributeIBMRetainKey:               "CKA_IBM_RETAINKEY",
+	attributeIBMAttrBound:               "CKA_IBM_ATTRBOUND",
+	attributeIBMKeyType:                 "CKA_IBM_KEYTYPE",
+	attributeIBMUseAsData:               "CKA_IBM_USE_AS_DATA",
+	attributeIBMStdCompliance1:          "CKA_IBM_STD_COMPLIANCE1",
+	attributeIBMProtkeyExtractable:      "CKA_IBM_PROTKEY_EXTRACTABLE",
+	attributeIBMProtkeyNeverExtractable: "CKA_IBM_PROTKEY_NEVER_EXTRACTABLE",
+	attributeIBMDilithiumKeyform:        "CKA_IBM_DILITHIUM_KEYFORM",
+	attributeIBMKyberKeyform:            "CKA_IBM_KYBER_KEYFORM",
+	attributeIBMCCAAESKeyMode:           "CKA_IBM_CCA_AES_KEY_MODE",
 }
