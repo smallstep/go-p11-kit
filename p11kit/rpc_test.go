@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -83,35 +84,21 @@ func TestBuffer(t *testing.T) {
 			"date",
 			[]byte("\x00\x00\x00\x08" + "12341230" + "\x00\x00\x00\x08" + "20210101"),
 			func(b *buffer) []interface{} {
-				var t1, t2 time.Time
-				var empty1, empty2 bool
-				if b.date(&t1, &empty1) && b.date(&t2, &empty2) {
-					return []interface{}{t1, empty1, t2, empty2}
+				var a1, a2 []byte
+				if !b.byteArray(&a1) || !b.byteArray(&a2) {
+					return nil
 				}
-				return nil
+				t1, ok1 := parseDate(a1)
+				t2, ok2 := parseDate(a2)
+				if !ok1 || !ok2 {
+					return nil
+				}
+				return []interface{}{t1, t2}
 			},
 			[]interface{}{
-				time.Date(1234, 12, 30, 0, 0, 0, 0, time.UTC), false,
-				time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC), false,
+				time.Date(1234, 12, 30, 0, 0, 0, 0, time.UTC),
+				time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 			},
-		},
-		{
-			// An empty date arrives as a zero-length byte array, or as the NULL
-			// marker when the client passed no value.
-			"dateEmpty",
-			[]byte{
-				0x00, 0x00, 0x00, 0x00,
-				0xff, 0xff, 0xff, 0xff,
-			},
-			func(b *buffer) []interface{} {
-				var t1, t2 time.Time
-				var empty1, empty2 bool
-				if b.date(&t1, &empty1) && b.date(&t2, &empty2) {
-					return []interface{}{empty1, empty2}
-				}
-				return nil
-			},
-			[]interface{}{true, true},
 		},
 		{
 			// The bytes p11-kit sends for CKA_START_DATE in a template.
@@ -122,13 +109,7 @@ func TestBuffer(t *testing.T) {
 				0x00, 0x00, 0x00, 0x08, // length: sizeof(CK_DATE)
 				0x00, 0x00, 0x00, 0x08, // byte array length
 			}, []byte("20210101")...),
-			func(b *buffer) []interface{} {
-				var a attribute
-				if b.attribute(&a) {
-					return []interface{}{a}
-				}
-				return nil
-			},
+			decodeAttribute,
 			[]interface{}{attribute{
 				typ:  attributeStartDate,
 				date: ptrTime(time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)),
@@ -142,13 +123,19 @@ func TestBuffer(t *testing.T) {
 				0x00, 0x00, 0x00, 0x00, // length
 				0xff, 0xff, 0xff, 0xff, // NULL byte array
 			},
-			func(b *buffer) []interface{} {
-				var a attribute
-				if b.attribute(&a) {
-					return []interface{}{a}
-				}
-				return nil
+			decodeAttribute,
+			[]interface{}{attribute{typ: attributeEndDate}},
+		},
+		{
+			// An empty date can also arrive as a zero-length byte array.
+			"attributeDateZeroLength",
+			[]byte{
+				0x00, 0x00, 0x01, 0x11, // CKA_END_DATE
+				0x01,                   // validity
+				0x00, 0x00, 0x00, 0x00, // length
+				0x00, 0x00, 0x00, 0x00, // byte array length
 			},
+			decodeAttribute,
 			[]interface{}{attribute{typ: attributeEndDate}},
 		},
 		{
@@ -162,13 +149,7 @@ func TestBuffer(t *testing.T) {
 				0x00, 0x00, 0x00, 0x08, // byte array length
 				0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 			},
-			func(b *buffer) []interface{} {
-				var a attribute
-				if b.attribute(&a) {
-					return []interface{}{a}
-				}
-				return nil
-			},
+			decodeAttribute,
 			[]interface{}{attribute{
 				typ:   attributeType(0x624),
 				bytes: []byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
@@ -184,13 +165,7 @@ func TestBuffer(t *testing.T) {
 				0x00, 0x00, 0x00, 0x01, // length
 				0x01,
 			},
-			func(b *buffer) []interface{} {
-				var a attribute
-				if b.attribute(&a) {
-					return []interface{}{a}
-				}
-				return nil
-			},
+			decodeAttribute,
 			[]interface{}{attribute{typ: attributeIBMRestrictable, byte: ptrByte(1)}},
 		},
 		{
@@ -201,13 +176,7 @@ func TestBuffer(t *testing.T) {
 				0x00, 0x00, 0x00, 0x08, // length
 				0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
 			},
-			func(b *buffer) []interface{} {
-				var a attribute
-				if b.attribute(&a) {
-					return []interface{}{a}
-				}
-				return nil
-			},
+			decodeAttribute,
 			[]interface{}{attribute{typ: attributeIBMKeyType, ulong: ptrUint64(3)}},
 		},
 		{
@@ -221,13 +190,7 @@ func TestBuffer(t *testing.T) {
 				0x00, 0x00, 0x00, 0x00, // length
 				0x00,
 			},
-			func(b *buffer) []interface{} {
-				var a attribute
-				if b.attribute(&a) {
-					return []interface{}{a}
-				}
-				return nil
-			},
+			decodeAttribute,
 			[]interface{}{attribute{typ: attributeToken}},
 		},
 		{
@@ -533,13 +496,8 @@ func TestBufferAdd(t *testing.T) {
 
 // signInitRequest builds the body of a C_SignInit request as p11-kit sends it:
 // session 1, the mechanism type, the mechanism's parameter bytes as given, and
-// key handle 2.
-func signInitRequest(mech uint32, params []byte) *body {
-	return signInitRequestKey(mech, params, 2)
-}
-
-// signInitRequestKey is signInitRequest with the given key handle.
-func signInitRequestKey(mech uint32, params []byte, key uint64) *body {
+// the key handle.
+func signInitRequest(mech uint32, params []byte, key uint64) *body {
 	var b buffer
 	b.addUint64(1)
 	b.addUint32(mech)
@@ -584,7 +542,7 @@ func TestSignInitUnsupportedMechanism(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			h := &handler{s: &Handler{}}
-			_, err := h.handleSignInit(signInitRequest(test.mech, test.params))
+			_, err := h.handleSignInit(signInitRequest(test.mech, test.params, 2))
 			var perr pkcs11Error
 			if !errors.As(err, &perr) || perr != errMechanismInvalid {
 				t.Fatalf("handleSignInit() error = %v, want %v", err, errMechanismInvalid)
@@ -618,7 +576,7 @@ func TestReadSignMechanism(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			req := signInitRequestKey(test.mech, test.params, test.key)
+			req := signInitRequest(test.mech, test.params, test.key)
 			var (
 				session, key uint64
 				m            mechanism
@@ -636,10 +594,9 @@ func TestReadSignMechanism(t *testing.T) {
 	}
 }
 
-// TestHandleUndecodableAttribute checks that a C_FindObjectsInit template with
-// an attribute this package can't decode is answered with
-// CKR_ATTRIBUTE_VALUE_INVALID, and that the connection still serves requests.
-func TestHandleUndecodableAttribute(t *testing.T) {
+// TestHandleDecodeErrors checks that requests that fail to decode are answered
+// with a PKCS #11 error, and that the connection still serves requests.
+func TestHandleDecodeErrors(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	done := make(chan error, 1)
@@ -655,41 +612,85 @@ func TestHandleUndecodableAttribute(t *testing.T) {
 		t.Fatalf("reading protocol version: %v", err)
 	}
 
+	var id uint32
+	roundTrip := func(req *body) *body {
+		t.Helper()
+		id++
+		if err := writeResponse(client, id, req); err != nil {
+			t.Fatalf("writing %s: %v", req.call, err)
+		}
+		_, resp, err := readRequest(client)
+		if err != nil {
+			t.Fatalf("reading %s response: %v", req.call, err)
+		}
+		return resp
+	}
+
 	// p11-kit encodes CKA_DERIVE_TEMPLATE as an attribute array, which this
 	// package can't decode.
-	var buf buffer
-	buf.addUint64(1) // Session ID.
-	buf.addUint32(1) // Number of attributes.
-	buf.Write([]byte{
+	var tmpl buffer
+	tmpl.addUint64(1) // Session ID.
+	tmpl.addUint32(1) // Number of attributes.
+	tmpl.Write([]byte{
 		0x40, 0x00, 0x02, 0x13, // CKA_DERIVE_TEMPLATE
 		0x01,                   // validity
 		0x00, 0x00, 0x00, 0x04, // length
 		0x00, 0x00, 0x00, 0x00, // attribute array count
 	})
-	req := &body{call: callFindObjectsInit, signature: sigUlong + sigAttributeArray, buffer: buf}
-	if err := writeResponse(client, 1, req); err != nil {
-		t.Fatalf("writing C_FindObjectsInit: %v", err)
+	// C_GetSlotInfo takes only the slot ID.
+	var slot buffer
+	slot.addUint64(1)
+	slot.addUint32(0)
+	// C_Initialize with a handshake that isn't p11-kit's.
+	var init buffer
+	init.addByte(1) // The handshake has content.
+	init.addByteArray([]byte("WRONG-HANDSHAKE"))
+	init.addByte(0) // Reserved.
+	init.addByte(0) // Reserved data has no content.
+	init.addUint32(0)
+
+	tests := []struct {
+		name string
+		req  *body
+		want pkcs11Error
+	}{
+		{"undecodable attribute", &body{call: callFindObjectsInit, signature: sigUlong + sigAttributeArray, buffer: tmpl}, errAttributeValueInvalid},
+		{"trailing data", &body{call: callGetSlotInfo, signature: sigUlong, buffer: slot}, errDeviceError},
+		{"truncated", &body{call: callGetSlotInfo, signature: sigUlong}, errDeviceError},
+		// p11-kit's own server answers CKR_GENERAL_ERROR too.
+		{"wrong handshake", &body{call: callInitialize, signature: sigByteArray + sigByte + sigByteArray, buffer: init}, errGeneralError},
 	}
-	_, resp, err := readRequest(client)
-	if err != nil {
-		t.Fatalf("reading C_FindObjectsInit response: %v", err)
-	}
-	var code uint64
-	resp.readUlong(&code)
-	if resp.call != callError || pkcs11Error(code) != errAttributeValueInvalid {
-		t.Errorf("C_FindObjectsInit response = %s %v, want %s %v", resp.call, pkcs11Error(code), callError, errAttributeValueInvalid)
+	for _, test := range tests {
+		resp := roundTrip(test.req)
+		var code uint64
+		resp.readUlong(&code)
+		if resp.call != callError || pkcs11Error(code) != test.want {
+			t.Errorf("%s: response = %s %v, want %s %v", test.name, resp.call, pkcs11Error(code), callError, test.want)
+		}
 	}
 
-	if err := writeResponse(client, 2, &body{call: callFinalize}); err != nil {
-		t.Fatalf("writing C_Finalize: %v", err)
-	}
-	if _, resp, err = readRequest(client); err != nil {
-		t.Fatalf("reading C_Finalize response: %v", err)
-	}
-	if resp.call != callFinalize {
+	if resp := roundTrip(&body{call: callFinalize}); resp.call != callFinalize {
 		t.Errorf("C_Finalize response = %s, want %s", resp.call, callFinalize)
 	}
 	if err := <-done; err != nil {
 		t.Errorf("Handle() = %v, want nil", err)
+	}
+}
+
+// TestBodyErrTrailingDump checks that the error for trailing data dumps only
+// its first maxTrailingDump bytes.
+func TestBodyErrTrailingDump(t *testing.T) {
+	b := &body{buffer: newBuffer(bytes.Repeat([]byte{0xab}, 1000))}
+	err := b.err()
+	if !errors.Is(err, errDeviceError) {
+		t.Fatalf("err() = %v, want %v", err, errDeviceError)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "trailing data: 1000 bytes") {
+		t.Errorf("err() = %q, want the full length", msg)
+	}
+	// hex.Dump writes each byte as "ab", and its text column as ".".
+	if got := strings.Count(msg, "ab"); got != maxTrailingDump {
+		t.Errorf("err() dumps %d bytes, want %d:\n%s", got, maxTrailingDump, msg)
 	}
 }

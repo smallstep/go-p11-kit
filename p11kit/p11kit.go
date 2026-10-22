@@ -388,7 +388,9 @@ func (h *handler) handleInitialize(req *body) (*body, error) {
 		return nil, err
 	}
 	if string(handshake) != handshakeMessage {
-		return nil, fmt.Errorf("client sent unexpected handshake message: %s", handshake)
+		// Answered with CKR_GENERAL_ERROR, as p11-kit's own server does in
+		// rpc_C_Initialize, instead of closing the connection.
+		return nil, fmt.Errorf("client sent unexpected handshake message: %s: %w", handshake, errGeneralError)
 	}
 	return newResponse(req), nil
 }
