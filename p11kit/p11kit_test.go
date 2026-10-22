@@ -34,7 +34,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -596,132 +595,126 @@ func TestSignFailure(t *testing.T) {
 	}
 }
 
-// hashRecordingSigner records the hash it's asked to sign with, and signs any
-// digest whatever the hash.
-type hashRecordingSigner struct {
+// optsRecordingSigner records the opts it's asked to sign with, and signs any
+// digest whatever they say.
+type optsRecordingSigner struct {
 	*ecdsa.PrivateKey
-	hash crypto.Hash
+	opts []crypto.SignerOpts
 }
 
-func (s *hashRecordingSigner) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
-	s.hash = opts.HashFunc()
+func (s *optsRecordingSigner) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	s.opts = append(s.opts, opts)
 	return ecdsa.SignASN1(rand, s.PrivateKey, digest)
 }
 
-// TestSignECDSAHash checks the hash that CKM_ECDSA names to the signer for
-// each digest length. A SHA-1 digest is given no hash, so ecdsa.PrivateKey
-// refuses it since Go 1.27.
-func TestSignECDSAHash(t *testing.T) {
+// TestSignECDSAOpts checks that CKM_ECDSA names no hash to the signer, with nil
+// opts, for a digest of any length, SHA-1's and unknown lengths included, and
+// signs it in one call.
+func TestSignECDSAOpts(t *testing.T) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("Generating key: %v", err)
 	}
-	signer := &hashRecordingSigner{PrivateKey: priv}
+	signer := &optsRecordingSigner{PrivateKey: priv}
 	obj, err := NewPrivateKeyObject(signer)
 	if err != nil {
 		t.Fatalf("Creating private key object: %v", err)
 	}
-	tests := []struct {
-		length int
-		want   crypto.Hash
-	}{
-		{20, crypto.Hash(0)}, // SHA-1
-		{28, crypto.SHA224},
-		{32, crypto.SHA256},
-		{48, crypto.SHA384},
-		{64, crypto.SHA512},
-		{16, crypto.Hash(0)},
-	}
-	for _, test := range tests {
-		signer.hash = 0
-		if _, err := obj.sign(mechanism{typ: ckmECDSA, params: []byte{}}, make([]byte, test.length)); err != nil {
-			t.Errorf("sign %d bytes: %v", test.length, err)
+	for _, length := range []int{20, 28, 32, 48, 64, 16} {
+		signer.opts = nil
+		if _, err := obj.sign(mechanism{typ: ckmECDSA, params: []byte{}}, make([]byte, length)); err != nil {
+			t.Errorf("sign %d bytes: %v", length, err)
 			continue
 		}
-		if signer.hash != test.want {
-			t.Errorf("sign %d bytes: signer got hash %v, want %v", test.length, signer.hash, test.want)
+		if len(signer.opts) != 1 || signer.opts[0] != nil {
+			t.Errorf("sign %d bytes: signer got opts %v, want one call with nil", length, signer.opts)
 		}
 	}
 }
 
-// schemeSigner signs like go-attestation's TPM signer: the hash in opts is the
-// key's signing scheme, which only the curve's hash satisfies, and with
-// crypto.Hash(0) it uses the curve's hash and truncates the digest itself.
+// curveSchemeHash is the hash go-attestation creates a TPM ECDSA key's signing
+// scheme with, by curve.
+func curveSchemeHash(pub *ecdsa.PublicKey) crypto.Hash {
+	switch bits := pub.Params().BitSize; {
+	case bits <= 256:
+		return crypto.SHA256
+	case bits <= 384:
+		return crypto.SHA384
+	default:
+		return crypto.SHA512
+	}
+}
+
+// schemeSigner signs like go-attestation's TPM signer: a hash named in opts is
+// the key's signing scheme, which only the curve's hash satisfies, and with nil
+// opts the key's own scheme is used and the digest is truncated by the signer.
 type schemeSigner struct {
 	*ecdsa.PrivateKey
-	hashes []crypto.Hash
+	calls int
 }
 
 func (s *schemeSigner) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
-	s.hashes = append(s.hashes, opts.HashFunc())
-	if h := opts.HashFunc(); h != 0 && h != curveHash(&s.PublicKey) {
+	s.calls++
+	if opts != nil && opts.HashFunc() != curveSchemeHash(&s.PublicKey) {
 		return nil, errors.New("unsupported or incompatible scheme")
 	}
 	return ecdsa.SignASN1(rand, s.PrivateKey, digest)
 }
 
 // strictSigner signs like ecdsa.PrivateKey.Sign since Go 1.27, whatever Go
-// version the tests run with: opts must name a hash of the digest's length.
+// version the tests run with: opts that aren't nil must name a hash of the
+// digest's length.
 type strictSigner struct {
 	*ecdsa.PrivateKey
-	hashes []crypto.Hash
+	calls int
 }
 
 func (s *strictSigner) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
-	s.hashes = append(s.hashes, opts.HashFunc())
-	if h := opts.HashFunc(); h == 0 || h.Size() != len(digest) {
-		return nil, errors.New("ecdsa: hash length does not match hash function")
+	s.calls++
+	if opts != nil {
+		if h := opts.HashFunc(); h == 0 || h.Size() != len(digest) {
+			return nil, errors.New("ecdsa: hash length does not match hash function")
+		}
 	}
 	return ecdsa.SignASN1(rand, s.PrivateKey, digest)
 }
 
-// TestSignECDSASigners pins that a CKM_ECDSA digest of any SHA-2 length signs
-// with both kinds of signer, and how many attempts each takes: a TPM-like
-// signer refuses a hash other than its curve's, and a Go 1.27-like signer
-// refuses one other than the digest's.
+// TestSignECDSASigners checks that a CKM_ECDSA digest of any SHA-2 length signs
+// in one call with both kinds of signer: a TPM-like signer, which refuses a
+// hash other than its curve's, and a Go 1.27-like signer, which refuses one
+// other than the digest's.
 func TestSignECDSASigners(t *testing.T) {
 	msg := []byte("hello, world")
 	sum256 := sha256.Sum256(msg)
 	sum384 := sha512.Sum384(msg)
 	sum512 := sha512.Sum512(msg)
-	digests := []struct {
-		name   string
-		digest []byte
-		hash   crypto.Hash
-	}{
-		{"SHA256", sum256[:], crypto.SHA256},
-		{"SHA384", sum384[:], crypto.SHA384},
-		{"SHA512", sum512[:], crypto.SHA512},
+	digests := map[string][]byte{
+		"SHA256": sum256[:],
+		"SHA384": sum384[:],
+		"SHA512": sum512[:],
 	}
 	for _, curve := range []elliptic.Curve{elliptic.P256(), elliptic.P384()} {
 		priv, err := ecdsa.GenerateKey(curve, rand.Reader)
 		if err != nil {
 			t.Fatalf("Generating %s key: %v", curve.Params().Name, err)
 		}
-		for _, d := range digests {
-			t.Run(curve.Params().Name+"/"+d.name, func(t *testing.T) {
+		for name, digest := range digests {
+			t.Run(curve.Params().Name+"/"+name, func(t *testing.T) {
 				scheme := &schemeSigner{PrivateKey: priv}
 				strict := &strictSigner{PrivateKey: priv}
-				// The TPM-like signer is tried with the digest's hash first,
-				// and with crypto.Hash(0) if that isn't its curve's.
-				wantScheme := []crypto.Hash{d.hash}
-				if d.hash != curveHash(&priv.PublicKey) {
-					wantScheme = append(wantScheme, crypto.Hash(0))
-				}
 				for _, test := range []struct {
-					name    string
-					signer  crypto.Signer
-					hashes  *[]crypto.Hash
-					attempt []crypto.Hash
+					name   string
+					signer crypto.Signer
+					calls  *int
 				}{
-					{"scheme", scheme, &scheme.hashes, wantScheme},
-					{"strict", strict, &strict.hashes, []crypto.Hash{d.hash}},
+					{"scheme", scheme, &scheme.calls},
+					{"strict", strict, &strict.calls},
 				} {
 					obj, err := NewPrivateKeyObject(test.signer)
 					if err != nil {
 						t.Fatalf("Creating private key object: %v", err)
 					}
-					sig, err := obj.sign(mechanism{typ: ckmECDSA, params: []byte{}}, d.digest)
+					sig, err := obj.sign(mechanism{typ: ckmECDSA, params: []byte{}}, digest)
 					if err != nil {
 						t.Fatalf("%s signer: sign: %v", test.name, err)
 					}
@@ -729,33 +722,14 @@ func TestSignECDSASigners(t *testing.T) {
 					var r, s big.Int
 					r.SetBytes(sig[:size])
 					s.SetBytes(sig[size:])
-					if !ecdsa.Verify(&priv.PublicKey, d.digest, &r, &s) {
+					if !ecdsa.Verify(&priv.PublicKey, digest, &r, &s) {
 						t.Errorf("%s signer: signature doesn't verify", test.name)
 					}
-					if !reflect.DeepEqual(*test.hashes, test.attempt) {
-						t.Errorf("%s signer: tried hashes %v, want %v", test.name, *test.hashes, test.attempt)
+					if *test.calls != 1 {
+						t.Errorf("%s signer: signed in %d calls, want 1", test.name, *test.calls)
 					}
 				}
 			})
 		}
-	}
-}
-
-// TestSignECDSARefused pins that a signer refusing both attempts is reported
-// with both errors, as CKR_FUNCTION_FAILED.
-func TestSignECDSARefused(t *testing.T) {
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("Generating key: %v", err)
-	}
-	obj, err := NewPrivateKeyObject(&failingSigner{Signer: priv})
-	if err != nil {
-		t.Fatalf("Creating private key object: %v", err)
-	}
-	digest := sha512.Sum384([]byte("hello, world"))
-	_, err = obj.sign(mechanism{typ: ckmECDSA, params: []byte{}}, digest[:])
-	var cerr pkcs11Error
-	if !errors.As(err, &cerr) || cerr != errFunctionFailed {
-		t.Errorf("sign: error = %v, want %v", err, errFunctionFailed)
 	}
 }
