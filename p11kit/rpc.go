@@ -298,9 +298,17 @@ func (b *buffer) attribute(a *attribute) bool {
 		return false
 	}
 
-	// decoded is the number of value bytes the value type's decoder read,
-	// compared against the declared length below.
-	var decoded uint32
+	// The declared length must match the value, so that a value the peer
+	// encoded with a different value type than valueType() expects fails
+	// here instead of desynchronizing the rest of the message. Where p11-kit
+	// sends no value, the attribute is decoded without one, as p11-kit's own
+	// server passes it on with a NULL value:
+	//
+	//   - A byte or ulong of length 0 is followed by placeholder bytes.
+	//   - A byte array or date sent as a NULL array (0xffffffff), which
+	//     byteArray reads as nil, can have any declared length.
+	//
+	// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-message.c#L1398
 	attr := attribute{typ: attributeType(typ)}
 	switch attr.typ.valueType() {
 	case attributeTypeByte:
@@ -310,8 +318,11 @@ func (b *buffer) attribute(a *attribute) bool {
 		if !b.byte(&n) {
 			return false
 		}
-		attr.byte = &n
-		decoded = 1
+		if length == 1 {
+			attr.byte = &n
+		} else if length != 0 {
+			return false
+		}
 	case attributeTypeUlong:
 		// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L891
 		// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L1097
@@ -319,23 +330,32 @@ func (b *buffer) attribute(a *attribute) bool {
 		if !b.uint64(&n) {
 			return false
 		}
-		attr.ulong = &n
-		decoded = 8
+		if length == 8 {
+			attr.ulong = &n
+		} else if length != 0 {
+			return false
+		}
 	case attributeTypeMechanismArray:
 		// TODO(ericchiang): implement
 		return false
 	case attributeTypeDate:
 		// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-message.c#L1317
-		var (
-			t     time.Time
-			empty bool
-		)
-		if !b.date(&t, &empty) {
+		var arr []byte
+		if !b.byteArray(&arr) {
 			return false
 		}
-		if !empty {
-			attr.date = &t
-			decoded = 8
+		if arr != nil {
+			if uint32(len(arr)) != length {
+				return false
+			}
+			// An empty date is allowed for CKA_START_DATE and CKA_END_DATE.
+			if length != 0 {
+				t, ok := parseDate(arr)
+				if !ok {
+					return false
+				}
+				attr.date = &t
+			}
 		}
 	case attributeTypeByteArray:
 		// https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L895
@@ -344,20 +364,13 @@ func (b *buffer) attribute(a *attribute) bool {
 		if !b.byteArray(&arr) {
 			return false
 		}
-		attr.bytes = arr
-		decoded = uint32(len(arr))
+		if arr != nil {
+			if uint32(len(arr)) != length {
+				return false
+			}
+			attr.bytes = arr
+		}
 	default:
-		return false
-	}
-	// p11-kit rejects an attribute whose declared length is shorter than the
-	// decoded value. Requiring an exact match also catches a value the peer
-	// encoded with a different value type than valueType() expects, which
-	// would otherwise desynchronize the rest of the message. A length of zero
-	// is a NULL value: p11-kit still writes the value type's placeholder
-	// bytes for it.
-	//
-	// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-message.c#L1419
-	if length != 0 && length != decoded {
 		return false
 	}
 	*a = attr
@@ -393,6 +406,9 @@ func (b *buffer) uint64(n *uint64) bool {
 	return true
 }
 
+// byteArray reads a byte array. A NULL array, the marker 0xffffffff that
+// p11-kit writes for an array without data, is read as nil, and an empty one
+// as a non-nil empty slice.
 func (b *buffer) byteArray(a *[]byte) bool {
 	var n uint32
 	if !b.uint32(&n) {
@@ -400,27 +416,17 @@ func (b *buffer) byteArray(a *[]byte) bool {
 	}
 	if n == 0xffffffff {
 		// https://github.com/p11-glue/p11-kit/blob/0.24.1/p11-kit/rpc-message.c#L730
+		*a = nil
 		return true
 	}
-	if len(b.b) < int(n) {
+	// Compared as uint64: on 32-bit platforms int(n) is negative for lengths
+	// of 2 GiB or more, which would pass the check and panic on the slice.
+	if uint64(len(b.b)) < uint64(n) {
 		return false
 	}
 	*a = b.b[:n]
 	b.b = b.b[n:]
 	return true
-}
-
-// skipNullMarker checks if the buffer starts with the special marker 0xffffffff
-// that represents an empty/null byte array in the RPC protocol. If present, it
-// advances the buffer by 4 bytes to skip the marker. If not present, the buffer
-// remains unchanged.
-func (b *buffer) skipNullMarker() {
-	if len(b.b) >= 4 {
-		buff := b.b[:4]
-		if binaryEncoding.Uint32(buff) == 0xffffffff {
-			b.b = b.b[4:]
-		}
-	}
 }
 
 // skipByteMarker checks if the buffer starts with the given byte. If present,
@@ -434,40 +440,27 @@ func (b *buffer) skipByteMarker(marker byte) {
 	}
 }
 
-// date decodes a CK_DATE the way p11-kit encodes it: a byte array that is
-// either the eight characters YYYYMMDD or empty. empty reports an empty date,
-// which PKCS #11 allows for CKA_START_DATE and CKA_END_DATE and which p11-kit
-// sends as a zero-length or NULL byte array; t is left unset then.
+// parseDate parses the eight characters YYYYMMDD of a CK_DATE, which p11-kit
+// sends as a byte array.
 //
 // https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-message.c#L1317
-func (b *buffer) date(t *time.Time, empty *bool) bool {
-	var arr []byte
-	if !b.byteArray(&arr) {
-		return false
-	}
-	switch len(arr) {
-	case 0:
-		*empty = true
-		return true
-	case 8:
-	default:
-		return false
+func parseDate(arr []byte) (time.Time, bool) {
+	if len(arr) != 8 {
+		return time.Time{}, false
 	}
 	year, err := strconv.ParseUint(string(arr[:4]), 10, 64)
 	if err != nil {
-		return false
+		return time.Time{}, false
 	}
 	month, err := strconv.ParseUint(string(arr[4:6]), 10, 64)
 	if err != nil {
-		return false
+		return time.Time{}, false
 	}
 	day, err := strconv.ParseUint(string(arr[6:8]), 10, 64)
 	if err != nil {
-		return false
+		return time.Time{}, false
 	}
-	*t = time.Date(int(year), time.Month(month), int(day), 0, 0, 0, 0, time.UTC)
-	*empty = false
-	return true
+	return time.Date(int(year), time.Month(month), int(day), 0, 0, 0, 0, time.UTC), true
 }
 
 type body struct {
@@ -495,18 +488,35 @@ const (
 	sigVersion         = "v"
 )
 
+// err returns the error of a request that failed to decode. Errors carry
+// CKR_DEVICE_ERROR, as p11-kit's own server answers a request it can't parse,
+// unless a reader set a more specific PKCS #11 error. Handle answers them
+// instead of closing the connection: readRequest read the whole request, so
+// the connection stays in step, and p11-kit doesn't connect again after the
+// connection closes.
+//
+// https://github.com/p11-glue/p11-kit/blob/0.26.5/p11-kit/rpc-server.c#L71
 func (b *body) err() error {
 	if b.error != nil {
 		return b.error
 	}
 	if len(b.signature) != 0 {
-		return fmt.Errorf("trailing elements: %s", b.signature)
+		return fmt.Errorf("trailing elements: %s: %w", b.signature, errDeviceError)
 	}
-	if b.buffer.len() != 0 {
-		return fmt.Errorf("trailing data: %d bytes:\n%s", b.buffer.len(), hex.Dump(b.buffer.bytes()))
+	if n := b.buffer.len(); n != 0 {
+		// Handle logs the error and keeps the connection, so a client can
+		// repeat it: dump only the start of the data.
+		data := b.buffer.bytes()
+		if len(data) > maxTrailingDump {
+			data = data[:maxTrailingDump]
+		}
+		return fmt.Errorf("trailing data: %d bytes: %w\n%s", n, errDeviceError, hex.Dump(data))
 	}
 	return nil
 }
+
+// maxTrailingDump is the number of trailing bytes err includes in its error.
+const maxTrailingDump = 64
 
 func (b *body) writeSig(next string) {
 	b.signature += next
@@ -517,7 +527,7 @@ func (b *body) sig(want string) bool {
 		return false
 	}
 	if !strings.HasPrefix(b.signature, want) {
-		b.error = fmt.Errorf("invalid signature attempting to parse '%s' from '%s'", want, b.signature)
+		b.error = fmt.Errorf("invalid signature attempting to parse '%s' from '%s': %w", want, b.signature, errDeviceError)
 		return false
 	}
 	b.signature = strings.TrimPrefix(b.signature, want)
@@ -531,10 +541,11 @@ func (b *body) decode(sig string, fn func() bool) {
 	if !b.sig(sig) {
 		return
 	}
-	if fn() {
+	// fn can set its own error, such as a more specific PKCS #11 error.
+	if fn() || b.error != nil {
 		return
 	}
-	b.error = io.ErrUnexpectedEOF
+	b.error = fmt.Errorf("decoding '%s': %v: %w", sig, io.ErrUnexpectedEOF, errDeviceError)
 }
 
 // https://github.com/p11-glue/p11-kit/blob/0.24.0/p11-kit/rpc-message.c#L278
@@ -626,6 +637,9 @@ func (b *body) readAttributeArray(a *[]attribute) {
 		for i = 0; i < length; i++ {
 			var attr attribute
 			if !b.buffer.attribute(&attr) {
+				// The value types this package can't decode, such as
+				// attribute arrays, end up here.
+				b.error = fmt.Errorf("decoding attribute %d of %d: %w", i+1, length, errAttributeValueInvalid)
 				return false
 			}
 			arr = append(arr, attr)
@@ -710,10 +724,18 @@ func (b *body) readMechanism(m *mechanism) {
 		case ckmECDSA, ckmRSAPKCS:
 			// Commit https://github.com/p11-glue/p11-kit/commit/6449cfe59b80344c87832c9e38afcb4df3f61c56
 			// (p11-kit 0.25.6+) removed the empty byte array added on those
-			// mechanism that do not have parameters. The following code will
-			// read an empty array if there is one in the buffer or leave the
-			// buffer as it was.
-			b.buffer.skipNullMarker()
+			// mechanism that do not have parameters. In C_SignInit the
+			// mechanism is followed only by the 8 byte key handle, so the
+			// array is there when 12 bytes are left. Telling them apart by
+			// length, rather than by the 0xffffffff marker, keeps a key
+			// handle whose upper half is 0xffffffff from being read as the
+			// marker, and also reads a zero length array.
+			if b.buffer.len() == 4+8 {
+				var p []byte
+				if !b.buffer.byteArray(&p) || len(p) != 0 {
+					return false
+				}
+			}
 			m.params = []byte(nil)
 		default:
 			// Only the mechanisms above can be used to sign, and p11-kit
