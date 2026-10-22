@@ -419,7 +419,9 @@ func (b *buffer) byteArray(a *[]byte) bool {
 		*a = nil
 		return true
 	}
-	if len(b.b) < int(n) {
+	// Compared as uint64: on 32-bit platforms int(n) is negative for lengths
+	// of 2 GiB or more, which would pass the check and panic on the slice.
+	if uint64(len(b.b)) < uint64(n) {
 		return false
 	}
 	*a = b.b[:n]
