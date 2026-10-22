@@ -176,23 +176,66 @@ var hashLengths = map[int]crypto.Hash{
 	crypto.SHA512.Size(): crypto.SHA512,
 }
 
+// signECDSADigest signs a CKM_ECDSA digest with priv, returning the DER
+// signature.
+//
+// CKM_ECDSA carries only a digest computed by the client, without saying which
+// hash computed it, and an ECDSA signature depends only on the digest. Signers
+// read the hash in opts differently:
+//
+//   - Since Go 1.27, ecdsa.PrivateKey.Sign rejects crypto.Hash(0) and any hash
+//     whose size isn't the digest's length.
+//   - A TPM signer such as go-attestation's uses it as the key's signing
+//     scheme, which the key was created with, normally the hash of its curve,
+//     and refuses any other. Given crypto.Hash(0), it uses the curve's hash and
+//     truncates the digest to the curve's size itself.
+//
+// When the digest has the length of the curve's hash, naming that hash
+// satisfies both, in one call. Otherwise, such as a SHA-384 digest for a P-256
+// key, which TLS 1.2 allows, the hash named by the digest's length is tried
+// first, and crypto.Hash(0) if the signer refuses it. A digest of a length no
+// hash here produces, SHA-1's included as for CKM_RSA_PKCS, is signed with
+// crypto.Hash(0) only, so a signer that requires a hash refuses it.
+func signECDSADigest(priv crypto.Signer, pub *ecdsa.PublicKey, digest []byte) ([]byte, error) {
+	lengthHash, ok := hashLengths[len(digest)]
+	if !ok {
+		return priv.Sign(rand.Reader, digest, crypto.Hash(0))
+	}
+	sig, err := priv.Sign(rand.Reader, digest, lengthHash)
+	if err == nil || lengthHash == curveHash(pub) {
+		return sig, err
+	}
+	sig, retryErr := priv.Sign(rand.Reader, digest, crypto.Hash(0))
+	if retryErr != nil {
+		return nil, errors.Join(err, retryErr)
+	}
+	return sig, nil
+}
+
+// curveHash returns the hash conventionally paired with pub's curve: SHA-256
+// up to 256 bits, SHA-384 up to 384, and SHA-512 above.
+func curveHash(pub *ecdsa.PublicKey) crypto.Hash {
+	switch bits := pub.Params().BitSize; {
+	case bits <= 256:
+		return crypto.SHA256
+	case bits <= 384:
+		return crypto.SHA384
+	default:
+		return crypto.SHA512
+	}
+}
+
 func signECDSA(priv crypto.Signer, m mechanism, data []byte) ([]byte, error) {
 	// http://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/errata01/os/pkcs11-curr-v2.40-errata01-os-complete.html#_Toc441850452
 	if !m.noParams() {
 		return nil, fmt.Errorf("CKM_ECDSA does not take any parameters: %w", errArgumentsBad)
 	}
 
-	// CKM_ECDSA signs a digest computed by the client, and doesn't say which
-	// hash computed it. Since Go 1.27, ecdsa.PrivateKey.Sign rejects
-	// crypto.Hash(0) and any hash whose size isn't the digest's length, so
-	// name the hash by the length. The signature doesn't depend on which hash
-	// it is, only on the digest. SHA-1 isn't named, as for CKM_RSA_PKCS, so a
-	// signer that requires a hash refuses a SHA-1 digest.
-	opts := crypto.Hash(0)
-	if h, ok := hashLengths[len(data)]; ok {
-		opts = h
+	pub, ok := priv.Public().(*ecdsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("expected ecdsa public key, got %T", priv.Public())
 	}
-	sig, err := priv.Sign(rand.Reader, data, opts)
+	sig, err := signECDSADigest(priv, pub, data)
 	if err != nil {
 		return nil, err
 	}
@@ -209,10 +252,6 @@ func signECDSA(priv crypto.Signer, m mechanism, data []byte) ([]byte, error) {
 	}
 
 	// Padding, both big.Int and PKCS#11 signature are big-endian
-	pub, ok := priv.Public().(*ecdsa.PublicKey)
-	if !ok {
-		return nil, fmt.Errorf("expected ecdsa public key, got %T", priv.Public())
-	}
 	size := (pub.Params().N.BitLen() + 7) / 8 // round up
 
 	// Ensure size is big enough
