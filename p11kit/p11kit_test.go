@@ -551,6 +551,55 @@ func (failingSigner) Sign(io.Reader, []byte, crypto.SignerOpts) ([]byte, error) 
 	return nil, errors.New("signer unavailable")
 }
 
+// hashFuncSigner calls opts.HashFunc() without checking opts, as cloud KMS
+// signers used to, so it panics on the nil opts of CKM_ECDSA.
+type hashFuncSigner struct {
+	*ecdsa.PrivateKey
+}
+
+func (s hashFuncSigner) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	if opts.HashFunc().Size() != len(digest) {
+		return nil, errors.New("hash length does not match digest")
+	}
+	return ecdsa.SignASN1(rand, s.PrivateKey, digest)
+}
+
+// TestSignPanic checks that C_Sign reports a signer that panics with
+// CKR_FUNCTION_FAILED instead of crashing the process.
+func TestSignPanic(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("Generating key: %v", err)
+	}
+	obj, err := NewPrivateKeyObject(hashFuncSigner{priv})
+	if err != nil {
+		t.Fatalf("Creating private key object: %v", err)
+	}
+	h := &handler{
+		s: &Handler{},
+		sessions: map[uint64]*session{
+			1: {
+				signMechanism: mechanism{typ: ckmECDSA, params: []byte{}},
+				signObject:    obj,
+			},
+		},
+	}
+
+	digest := sha256.Sum256([]byte("hello, world"))
+	var buf buffer
+	buf.addUint64(1) // Session ID.
+	buf.addByte(1)   // The data has content.
+	buf.addByteArray(digest[:])
+	buf.addUint32(64) // Signature length.
+	req := &body{call: callSign, signature: sigUlong + sigByteArray + sigByteBuffer, buffer: buf}
+
+	_, err = h.handleSign(req)
+	var cerr pkcs11Error
+	if !errors.As(err, &cerr) || cerr != errFunctionFailed {
+		t.Errorf("handleSign error = %v, want %v", err, errFunctionFailed)
+	}
+}
+
 // TestSignFailure checks that C_Sign reports a failed signer with a PKCS #11
 // error, which Handle returns to the client, instead of an error that would
 // close the connection.

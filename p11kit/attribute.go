@@ -135,8 +135,17 @@ func (o *Object) attributeValue(typ attributeType) (attribute, bool) {
 	return attribute{}, false
 }
 
-func (o *Object) sign(m mechanism, data []byte) ([]byte, error) {
-	sig, err := o.signMechanism(m, data)
+func (o *Object) sign(m mechanism, data []byte) (sig []byte, err error) {
+	// A signer that panics, such as one that calls opts.HashFunc() on the nil
+	// opts of CKM_ECDSA, would take down the process and every client of the
+	// token with it. Report it as CKR_FUNCTION_FAILED instead.
+	defer func() {
+		if r := recover(); r != nil {
+			sig, err = nil, fmt.Errorf("signer panicked: %v: %w", r, errFunctionFailed)
+		}
+	}()
+
+	sig, err = o.signMechanism(m, data)
 	if err != nil {
 		// Handle closes the connection on an error without a PKCS #11 return
 		// value, and p11-kit doesn't connect again, so the token would stay
@@ -168,14 +177,6 @@ func (o *Object) signMechanism(m mechanism, data []byte) ([]byte, error) {
 	}
 }
 
-// hashLengths maps the length of a digest to the hash that produces it.
-var hashLengths = map[int]crypto.Hash{
-	crypto.SHA224.Size(): crypto.SHA224,
-	crypto.SHA256.Size(): crypto.SHA256,
-	crypto.SHA384.Size(): crypto.SHA384,
-	crypto.SHA512.Size(): crypto.SHA512,
-}
-
 func signECDSA(priv crypto.Signer, m mechanism, data []byte) ([]byte, error) {
 	// http://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/errata01/os/pkcs11-curr-v2.40-errata01-os-complete.html#_Toc441850452
 	if !m.noParams() {
@@ -195,7 +196,10 @@ func signECDSA(priv crypto.Signer, m mechanism, data []byte) ([]byte, error) {
 	//   - go-attestation's TPM signer then signs with the key's own scheme,
 	//     and truncates the digest to the curve's size itself.
 	//
-	// So a digest of any length signs with both, in one call.
+	// So a digest of any length signs with both, in one call. Other signers
+	// must accept nil opts too, as go.step.sm/crypto's KMS and TPM signers do
+	// by padding or truncating the digest to the curve's hash. A signer that
+	// panics on nil opts fails with CKR_FUNCTION_FAILED.
 	sig, err := priv.Sign(rand.Reader, data, nil)
 	if err != nil {
 		return nil, err
