@@ -388,7 +388,9 @@ func (h *handler) handleInitialize(req *body) (*body, error) {
 		return nil, err
 	}
 	if string(handshake) != handshakeMessage {
-		return nil, fmt.Errorf("client sent unexpected handshake message: %s", handshake)
+		// Answered with CKR_GENERAL_ERROR, as p11-kit's own server does in
+		// rpc_C_Initialize, instead of closing the connection.
+		return nil, fmt.Errorf("client sent unexpected handshake message: %s: %w", handshake, errGeneralError)
 	}
 	return newResponse(req), nil
 }
@@ -878,6 +880,22 @@ func readByte(r io.Reader) (byte, error) {
 	var buf [1]byte
 	_, err := io.ReadFull(r, buf[:])
 	return buf[0], err
+}
+
+// ProtocolVersionError is the error generated when a client attempts to speak
+// an unsupported protocol version.
+//
+// Deprecated: [Handler.Handle] no longer returns ProtocolVersionError. It
+// agrees on a protocol version with any client, answering with the lower of
+// the client's version and the highest version the package speaks.
+type ProtocolVersionError struct {
+	Version     byte
+	PeerVersion byte
+}
+
+// Error implements the error interface on [ProtocolVersionError].
+func (e *ProtocolVersionError) Error() string {
+	return fmt.Sprintf("client attempting to speak unsupported protocol version: %d", e.PeerVersion)
 }
 
 // protocolVersionMax is the highest RPC protocol version the handler speaks.

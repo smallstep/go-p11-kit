@@ -2,6 +2,7 @@
 build:
 	go build ./p11kit/...
 	go build -o ./bin/example-p11-kit-server ./example/example-p11-kit-server
+	go build -o ./bin/advanced-p11-kit-server ./example/advanced-p11-kit-server
 
 .PHONY: test
 test:

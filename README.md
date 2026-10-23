@@ -70,3 +70,17 @@ Public Key Object; RSA 256 bits
   Usage:      encrypt, verify
   Access:     none
 ```
+
+The advanced-p11-kit-server example uses more of the package. It needs no
+files: it generates a CA and keys in memory and serves two tokens. The "static"
+token holds the CA certificate, and an RSA and an ECDSA P-256 identity that use
+`SetLabel` and `SetKeyIdentifier` to link each certificate to its keys. The
+"rotating" token uses `Slot.GetObjects` to issue a new short-lived certificate
+for every session, and `SetID` to keep the same object handles across sessions.
+Every private key is wrapped in a `crypto.Signer` that logs its signatures, the
+same way a server can serve keys held in a KMS or a TPM.
+
+```
+go build -o bin/advanced-p11-kit-server ./example/advanced-p11-kit-server
+./bin/advanced-p11-kit-server --ca-cert bin/ca.pem
+```

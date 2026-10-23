@@ -23,6 +23,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/asn1"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -134,7 +135,32 @@ func (o *Object) attributeValue(typ attributeType) (attribute, bool) {
 	return attribute{}, false
 }
 
-func (o *Object) sign(m mechanism, data []byte) ([]byte, error) {
+func (o *Object) sign(m mechanism, data []byte) (sig []byte, err error) {
+	// A signer that panics, such as one that calls opts.HashFunc() on the nil
+	// opts of CKM_ECDSA, would take down the process and every client of the
+	// token with it. Report it as CKR_FUNCTION_FAILED instead.
+	defer func() {
+		if r := recover(); r != nil {
+			sig, err = nil, fmt.Errorf("signer panicked: %v: %w", r, errFunctionFailed)
+		}
+	}()
+
+	sig, err = o.signMechanism(m, data)
+	if err != nil {
+		// Handle closes the connection on an error without a PKCS #11 return
+		// value, and p11-kit doesn't connect again, so the token would stay
+		// unavailable. Report a signer that failed, such as one whose KMS is
+		// unreachable, as CKR_FUNCTION_FAILED instead.
+		var cerr pkcs11Error
+		if !errors.As(err, &cerr) {
+			return nil, fmt.Errorf("%v: %w", err, errFunctionFailed)
+		}
+		return nil, err
+	}
+	return sig, nil
+}
+
+func (o *Object) signMechanism(m mechanism, data []byte) ([]byte, error) {
 	if o.priv == nil {
 		return nil, fmt.Errorf("object isn't a private key: %w", errKeyHandleInvalid)
 	}
@@ -151,18 +177,30 @@ func (o *Object) sign(m mechanism, data []byte) ([]byte, error) {
 	}
 }
 
-var hashLengths = map[int]crypto.Hash{
-	crypto.SHA256.Size(): crypto.SHA256,
-	crypto.SHA384.Size(): crypto.SHA384,
-	crypto.SHA512.Size(): crypto.SHA512,
-}
-
 func signECDSA(priv crypto.Signer, m mechanism, data []byte) ([]byte, error) {
 	// http://docs.oasis-open.org/pkcs11/pkcs11-curr/v2.40/errata01/os/pkcs11-curr-v2.40-errata01-os-complete.html#_Toc441850452
 	if !m.noParams() {
 		return nil, fmt.Errorf("CKM_ECDSA does not take any parameters: %w", errArgumentsBad)
 	}
-	sig, err := priv.Sign(rand.Reader, data, crypto.Hash(0))
+
+	pub, ok := priv.Public().(*ecdsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("expected ecdsa public key, got %T", priv.Public())
+	}
+	// CKM_ECDSA carries only a digest computed by the client, without saying
+	// which hash computed it, and an ECDSA signature depends only on the
+	// digest. nil opts says no hash is named:
+	//
+	//   - ecdsa.PrivateKey.Sign checks the hash only when opts isn't nil
+	//     (since Go 1.27, it must be one of the digest's length).
+	//   - go-attestation's TPM signer then signs with the key's own scheme,
+	//     and truncates the digest to the curve's size itself.
+	//
+	// So a digest of any length signs with both, in one call. Other signers
+	// must accept nil opts too, as go.step.sm/crypto's KMS and TPM signers do
+	// by padding or truncating the digest to the curve's hash. A signer that
+	// panics on nil opts fails with CKR_FUNCTION_FAILED.
+	sig, err := priv.Sign(rand.Reader, data, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -179,10 +217,6 @@ func signECDSA(priv crypto.Signer, m mechanism, data []byte) ([]byte, error) {
 	}
 
 	// Padding, both big.Int and PKCS#11 signature are big-endian
-	pub, ok := priv.Public().(*ecdsa.PublicKey)
-	if !ok {
-		return nil, fmt.Errorf("expected ecdsa public key, got %T", priv.Public())
-	}
 	size := (pub.Params().N.BitLen() + 7) / 8 // round up
 
 	// Ensure size is big enough
